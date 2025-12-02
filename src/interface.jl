@@ -23,7 +23,7 @@ const UPDATE_COEFFS_WARNING = """
     input vector, then it is, by definition, a nonlinear operator.
     We recommend sticking such nonlinearities in `FunctionOperator.`
     This topic is further discussed in
-    (this issue)[https://github.com/SciML/SciMLOperators.jl/issues/159].
+    [this issue](https://github.com/SciML/SciMLOperators.jl/issues/159).
 """
 
 """
@@ -460,4 +460,5 @@ function LinearAlgebra.mul!(v::AbstractArray,
     end
     mul!(v, concretize(L), u, α, β)
 end
+
 #

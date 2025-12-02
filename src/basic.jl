@@ -243,9 +243,11 @@ end
 
 # constructors
 for T in SCALINGNUMBERTYPES[2:end]
-    @eval ScaledOperator(λ::$T, L::AbstractSciMLOperator) = ScaledOperator(
-        ScalarOperator(λ),
-        L)
+    @eval function ScaledOperator(λ::$T, L::AbstractSciMLOperator)
+        T2 = Base.promote_eltype(λ, L)
+        Λ = λ isa UniformScaling ? UniformScaling(T2(λ.λ)) : T2(λ)
+        ScaledOperator(ScalarOperator(Λ), L)
+    end
 end
 
 for T in SCALINGNUMBERTYPES
@@ -276,18 +278,16 @@ for T in SCALINGNUMBERTYPES[2:end]
         isconstant(L.λ) && return ScaledOperator(α * L.λ, L.L)
         return ScaledOperator(L.λ, α * L.L) # Try to propagate the rule
     end
-    @eval function Base.:*(α::$T, L::MatrixOperator)
-        isconstant(L) && return MatrixOperator(α * L.A)
-        return ScaledOperator(α, L) # Going back to the generic case
-    end
-    @eval function Base.:*(L::MatrixOperator, α::$T)
-        isconstant(L) && return MatrixOperator(α * L.A)
-        return ScaledOperator(α, L) # Going back to the generic case
-    end
 end
 
-Base.:-(L::AbstractSciMLOperator) = ScaledOperator(-true, L)
 Base.:+(L::AbstractSciMLOperator) = L
+Base.:-(L::AbstractSciMLOperator{T}) where T = ScaledOperator(-one(T), L)
+
+# Special cases for constant scalars. These simplify the structure when applicable
+function Base.:-(L::ScaledOperator)
+    isconstant(L.λ) && return ScaledOperator(-L.λ, L.L)
+    return ScaledOperator(L.λ, -L.L) # Try to propagate the rule
+end
 
 function Base.convert(::Type{AbstractMatrix}, L::ScaledOperator)
     convert(Number, L.λ) * convert(AbstractMatrix, L.L)
@@ -428,9 +428,11 @@ struct AddedOperator{T,
 
     function AddedOperator(ops)
         @assert !isempty(ops)
-        _check_AddedOperator_sizes(ops)
-        T = promote_type(eltype.(ops)...)
-        new{T, typeof(ops)}(ops)
+        # Flatten nested AddedOperators
+        ops_flat = _flatten_added_operators(ops)
+        _check_AddedOperator_sizes(ops_flat)
+        T = mapreduce(eltype, promote_type, ops_flat)
+        new{T, typeof(ops_flat)}(ops_flat)
     end
 end
 
@@ -439,6 +441,25 @@ function AddedOperator(ops::AbstractSciMLOperator...)
 end
 
 AddedOperator(L::AbstractSciMLOperator) = L
+
+# Helper function to flatten nested AddedOperators
+@generated function _flatten_added_operators(ops::Tuple)
+    exprs = ()
+    for i in 1:length(ops.parameters)
+        T = ops.parameters[i]
+        if T <: AddedOperator
+            # If this element is an AddedOperator, unpack its ops
+            exprs = (exprs..., :(ops[$i].ops...))
+        else
+            # Otherwise, keep the element as-is
+            exprs = (exprs..., :(ops[$i]))
+        end
+    end
+    
+    return quote
+        tuple($(exprs...))
+    end
+end
 
 @generated function _check_AddedOperator_sizes(ops::Tuple)
     ops_types = ops.parameters
@@ -476,9 +497,13 @@ function Base.:+(Z::NullOperator, A::AddedOperator)
     A
 end
 
+Base.:-(A::AddedOperator) = AddedOperator(map(-, A.ops))
 Base.:-(A::AbstractSciMLOperator, B::AbstractSciMLOperator) = AddedOperator(A, -B)
 Base.:-(A::AbstractSciMLOperator, B::AbstractMatrix) = A - MatrixOperator(B)
 Base.:-(A::AbstractMatrix, B::AbstractSciMLOperator) = MatrixOperator(A) - B
+Base.:-(A::AddedOperator, B::AbstractSciMLOperator) = AddedOperator(A.ops..., -B)
+Base.:-(A::AbstractSciMLOperator, B::AddedOperator) = AddedOperator(A, (-B).ops...)
+Base.:-(A::AddedOperator, B::AddedOperator) = AddedOperator(A.ops..., (-B).ops...)
 
 for op in (:+, :-)
     for T in SCALINGNUMBERTYPES
@@ -546,13 +571,13 @@ function Base.resize!(L::AddedOperator, n::Integer)
     L
 end
 
-function update_coefficients(L::AddedOperator, u, p, t)
-    ops = ()
-    for op in L.ops
-        ops = (ops..., update_coefficients(op, u, p, t))
+@generated function update_coefficients(L::AddedOperator, u, p, t)
+    ops_types = L.parameters[2].parameters
+    N = length(ops_types)
+    quote
+        ops = Base.@ntuple $N i -> update_coefficients(L.ops[i], u, p, t)
+        return AddedOperator(ops)
     end
-
-    @reset L.ops = ops
 end
 
 @generated function update_coefficients!(L::AddedOperator, u, p, t)
@@ -582,10 +607,8 @@ has_adjoint(L::AddedOperator) = all(has_adjoint, L.ops)
     ops_types = L.parameters[2].parameters
     N = length(ops_types)
     quote
-        Base.@nexprs $N i->begin
-            @reset L.ops[i] = cache_operator(L.ops[i], v)
-        end
-        L
+        ops = Base.@ntuple $N i -> cache_operator(L.ops[i], v)
+        return AddedOperator(ops)
     end
 end
 
@@ -883,15 +906,35 @@ function cache_internals(L::ComposedOperator, v::AbstractVecOrMat)
     @reset L.ops = ops
 end
 
-function LinearAlgebra.mul!(w::AbstractVecOrMat, L::ComposedOperator, v::AbstractVecOrMat)
-    @assert iscached(L) """cache needs to be set up for operator of type
-    $L. Set up cache by calling `cache_operator(L, v)`"""
+@generated function LinearAlgebra.mul!(w::AbstractVecOrMat, L::ComposedOperator, v::AbstractVecOrMat)
+    N = length(L.parameters[2].parameters)  # Number of operators
 
-    vecs = (w, L.cache[1:(end - 1)]..., v)
-    for i in reverse(1:length(L.ops))
-        mul!(vecs[i], L.ops[i], vecs[i + 1])
+    # Generate the mul! calls in reverse order
+    # vecs conceptually is (w, L.cache[1], L.cache[2], ..., L.cache[N-1], v)
+    # For i in reverse(1:N):
+    #   mul!(vecs[i], L.ops[i], vecs[i+1])
+
+    exprs = []
+    for i in N:-1:1
+        if i == N
+            # Last operator: mul!(L.cache[N-1], L.ops[N], v)
+            push!(exprs, :(mul!(L.cache[$(N - 1)], L.ops[$i], v)))
+        elseif i == 1
+            # First operator: mul!(w, L.ops[1], L.cache[1])
+            push!(exprs, :(mul!(w, L.ops[$i], L.cache[1])))
+        else
+            # Middle operators: mul!(L.cache[i-1], L.ops[i], L.cache[i])
+            push!(exprs, :(mul!(L.cache[$(i - 1)], L.ops[$i], L.cache[$i])))
+        end
     end
-    w
+
+    quote
+        @assert iscached(L) """cache needs to be set up for operator of type
+        $L. Set up cache by calling `cache_operator(L, v)`"""
+
+        $(exprs...)
+        w
+    end
 end
 
 function LinearAlgebra.mul!(w::AbstractVecOrMat,
@@ -910,15 +953,36 @@ function LinearAlgebra.mul!(w::AbstractVecOrMat,
     axpy!(β, cache, w)
 end
 
-function LinearAlgebra.ldiv!(w::AbstractVecOrMat, L::ComposedOperator, v::AbstractVecOrMat)
-    @assert iscached(L) """cache needs to be set up for operator of type
-    $L. Set up cache by calling `cache_operator(L, v)`."""
+@generated function LinearAlgebra.ldiv!(w::AbstractVecOrMat, L::ComposedOperator, v::AbstractVecOrMat)
+    N = length(L.parameters[2].parameters)  # Number of operators
 
-    vecs = (v, reverse(L.cache[1:(end - 1)])..., w)
-    for i in 1:length(L.ops)
-        ldiv!(vecs[i + 1], L.ops[i], vecs[i])
+    # Generate the ldiv! calls in forward order
+    # vecs conceptually is (v, reverse(L.cache[1:(N-1)])..., w)
+    # = (v, L.cache[N-1], L.cache[N-2], ..., L.cache[1], w)
+    # For i in 1:N:
+    #   ldiv!(vecs[i+1], L.ops[i], vecs[i])
+
+    exprs = []
+    for i in 1:N
+        if i == 1
+            # First operator: ldiv!(L.cache[N-1], L.ops[1], v)
+            push!(exprs, :(ldiv!(L.cache[$(N - 1)], L.ops[$i], v)))
+        elseif i == N
+            # Last operator: ldiv!(w, L.ops[N], L.cache[1])
+            push!(exprs, :(ldiv!(w, L.ops[$i], L.cache[1])))
+        else
+            # Middle operators: ldiv!(L.cache[N-i], L.ops[i], L.cache[N-i+1])
+            push!(exprs, :(ldiv!(L.cache[$(N - i)], L.ops[$i], L.cache[$(N - i + 1)])))
+        end
     end
-    w
+
+    quote
+        @assert iscached(L) """cache needs to be set up for operator of type
+        $L. Set up cache by calling `cache_operator(L, v)`."""
+
+        $(exprs...)
+        w
+    end
 end
 
 function LinearAlgebra.ldiv!(L::ComposedOperator, v::AbstractVecOrMat)
@@ -939,15 +1003,36 @@ function (L::ComposedOperator)(v::AbstractVecOrMat, u, p, t; kwargs...)
 end
 
 # In-place: w is destination, v is action vector, u is update vector
-function (L::ComposedOperator)(w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t; kwargs...)
-    update_coefficients!(L, u, p, t; kwargs...)
-    @assert iscached(L) "Cache needs to be set up for ComposedOperator. Call cache_operator(L, u) first."
+@generated function (L::ComposedOperator)(
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t; kwargs...)
+    N = length(L.parameters[2].parameters)  # Number of operators
 
-    vecs = (w, L.cache[1:(end - 1)]..., v)
-    for i in reverse(1:length(L.ops))
-        L.ops[i](vecs[i], vecs[i + 1], u, p, t; kwargs...)
+    # Generate the operator call expressions in reverse order
+    # vecs conceptually is (w, L.cache[1], L.cache[2], ..., L.cache[N-1], v)
+    # For i in reverse(1:N):
+    #   L.ops[i](vecs[i], vecs[i+1], u, p, t; kwargs...)
+
+    exprs = []
+    for i in N:-1:1
+        if i == N
+            # Last operator: L.ops[N](L.cache[N-1], v, u, p, t; kwargs...)
+            push!(exprs, :(L.ops[$i](L.cache[$(N - 1)], v, u, p, t; kwargs...)))
+        elseif i == 1
+            # First operator: L.ops[1](w, L.cache[1], u, p, t; kwargs...)
+            push!(exprs, :(L.ops[$i](w, L.cache[1], u, p, t; kwargs...)))
+        else
+            # Middle operators: L.ops[i](L.cache[i-1], L.cache[i], u, p, t; kwargs...)
+            push!(exprs, :(L.ops[$i](L.cache[$(i - 1)], L.cache[$i], u, p, t; kwargs...)))
+        end
     end
-    w
+
+    quote
+        update_coefficients!(L, u, p, t; kwargs...)
+        @assert iscached(L) "Cache needs to be set up for ComposedOperator. Call cache_operator(L, u) first."
+
+        $(exprs...)
+        w
+    end
 end
 
 # In-place with scaling: w = α*(L*v) + β*w

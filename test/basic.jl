@@ -141,6 +141,20 @@ end
     end
 end
 
+@testset "Unary +/-" begin
+    A = MatrixOperator(rand(N, N))
+    v = rand(N, K)
+
+    # Test unary +
+    @test +A === A
+    
+    # Test unary - on constant MatrixOperator (simplified to MatrixOperator)
+    minusA = -A
+    @test minusA isa ScaledOperator
+    @test minusA * v ≈ -A.A * v
+    @test eltype(minusA.λ) == eltype(A.A)
+end
+
 @testset "ScaledOperator" begin
     A = rand(N, N)
     D = Diagonal(rand(N))
@@ -269,42 +283,46 @@ end
     w_orig = copy(v)
     @test mul!(v, op, u, α, β) ≈ α * (A + B) * u + β * w_orig
 
-    # ensure AddedOperator doesn't nest
+    # Test flattening of nested AddedOperators via direct constructor
     A = MatrixOperator(rand(N, N))
-    L = A + (A + A) + A
+    B = MatrixOperator(rand(N, N))
+    C = MatrixOperator(rand(N, N))
+    
+    # Create nested structure: (A + B) is an AddedOperator
+    AB = A + B
+    @test AB isa AddedOperator
+    
+    # When we create AddedOperator((AB, C)), it should flatten
+    L = AddedOperator((AB, C))
     @test L isa AddedOperator
-    for op in L.ops
-        @test !isa(op, AddedOperator)
-    end
+    @test length(L.ops) == 3  # Should have A, B, C (not AB and C)
+    @test all(op -> !isa(op, AddedOperator), L.ops)
+    
+    # Verify correctness
+    test_vec = rand(N, K)
+    @test L * test_vec ≈ (A + B + C) * test_vec
 
     ## Time-Dependent Coefficients
-
     for T in (Float32, Float64, ComplexF32, ComplexF64)
         N = 100
-        A1_sparse = MatrixOperator(sprand(T, N, N, 5 / N))
-        A2_sparse = MatrixOperator(sprand(T, N, N, 5 / N))
-        A3_sparse = MatrixOperator(sprand(T, N, N, 5 / N))
+        A = sprand(T, N, N, 2 / N)
 
-        A1_dense = MatrixOperator(rand(T, N, N))
-        A2_dense = MatrixOperator(rand(T, N, N))
-        A3_dense = MatrixOperator(rand(T, N, N))
+        func1(a, u, p, t) = t
+        func2(a, u, p, t) = t^2
+        func3(a, u, p, t) = t^3
+        func4(a, u, p, t) = t^4
+        func5(a, u, p, t) = t^5
 
-        coeff1(a, u, p, t) = sin(p.ω * t)
-        coeff2(a, u, p, t) = cos(p.ω * t)
-        coeff3(a, u, p, t) = sin(p.ω * t) * cos(p.ω * t)
+        O1 = MatrixOperator(A) + ScalarOperator(0.0, func1) * MatrixOperator(A) + ScalarOperator(0.0, func2) * MatrixOperator(A)
 
-        c1 = ScalarOperator(rand(T), coeff1)
-        c2 = ScalarOperator(rand(T), coeff2)
-        c3 = ScalarOperator(rand(T), coeff3)
+        O2 = MatrixOperator(A) + ScalarOperator(0.0, func3) * MatrixOperator(A) + ScalarOperator(0.0, func4) * MatrixOperator(A)
 
-        H_sparse = c1 * A1_sparse + c2 * A2_sparse + c3 * A3_sparse
-        H_dense = c1 * A1_dense + c2 * A2_dense + c3 * A3_dense
+        O3 = MatrixOperator(A) + ScalarOperator(0.0, func5) * MatrixOperator(A)
 
-        u = rand(T, N)
-        v = rand(T, N)
-        du = similar(u)
-        p = (ω = 0.1,)
-        t = 0.1
+        Op = -1im * (O1 - O2)
+
+        @test length(Op.ops) == length(O1.ops) + length(O2.ops)
+        @inferred Op + O3
     end
 end
 
