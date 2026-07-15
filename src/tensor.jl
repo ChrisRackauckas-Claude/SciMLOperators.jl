@@ -64,25 +64,29 @@ struct TensorProductOperator{T, O, C} <: AbstractSciMLOperator{T}
     function TensorProductOperator(
             ops::NTuple{
                 2,
-                Union{AbstractMatrix, AbstractSciMLOperator}
+                Union{AbstractMatrix, AbstractSciMLOperator},
             },
-            cache::Union{Tuple, Nothing})
+            cache::Union{Tuple, Nothing}
+        )
         T = reduce(Base.promote_eltype, ops)
 
-        new{T,
+        return new{
+            T,
             typeof(ops),
-            typeof(cache)
+            typeof(cache),
         }(ops, cache)
     end
 end
 
-function TensorProductOperator(outer::Union{AbstractMatrix, AbstractSciMLOperator},
+function TensorProductOperator(
+        outer::Union{AbstractMatrix, AbstractSciMLOperator},
         inner::Union{AbstractMatrix, AbstractSciMLOperator};
-        cache = nothing)
+        cache = nothing
+    )
     outer = outer isa AbstractMatrix ? MatrixOperator(outer) : outer
     inner = inner isa AbstractMatrix ? MatrixOperator(inner) : inner
 
-    TensorProductOperator((outer, inner), cache)
+    return TensorProductOperator((outer, inner), cache)
 end
 
 # constructors
@@ -90,7 +94,23 @@ TensorProductOperator(ops...) = foldr(TensorProductOperator, ops)
 TensorProductOperator(op::AbstractSciMLOperator) = op
 TensorProductOperator(op::AbstractMatrix) = MatrixOperator(op)
 function TensorProductOperator(ii1::IdentityOperator, ii2::IdentityOperator)
-    IdentityOperator(ii1.len * ii2.len)
+    return IdentityOperator(ii1.len * ii2.len)
+end
+function TensorProductOperator(ii::IdentityOperator, op::TensorProductOperator)
+    left = TensorProductOperator(ii, op.ops[1])
+    if op.ops[2] isa IdentityOperator
+        # We call the main method to avoid recursion with the method below
+        return TensorProductOperator((left, op.ops[2]), nothing)
+    end
+    return TensorProductOperator(left, op.ops[2])
+end
+function TensorProductOperator(op::TensorProductOperator, ii::IdentityOperator)
+    right = TensorProductOperator(op.ops[2], ii)
+    if op.ops[1] isa IdentityOperator
+        # We call the main method to avoid recursion with the method above
+        return TensorProductOperator((op.ops[1], right), nothing)
+    end
+    return TensorProductOperator(op.ops[1], right)
 end
 
 """
@@ -116,7 +136,7 @@ Base.kron(A::AbstractSciMLOperator, B::AbstractMatrix) = TensorProductOperator(A
 Base.kron(ops::AbstractSciMLOperator...) = TensorProductOperator(ops...)
 
 function Base.convert(::Type{AbstractMatrix}, L::TensorProductOperator)
-    kron(convert.(AbstractMatrix, L.ops)...)
+    return kron(map(op -> convert(AbstractMatrix, op), L.ops)...)
 end
 
 #LinearAlgebra.opnorm(L::TensorProductOperator) = prod(opnorm, L.ops)
@@ -126,50 +146,252 @@ function Base.show(io::IO, L::TensorProductOperator)
     show(io, L.ops[1])
     print(io, " ⊗ ")
     show(io, L.ops[2])
-    print(io, ")")
+    return print(io, ")")
 end
-Base.size(L::TensorProductOperator) = reduce(.*, size.(L.ops))
+Base.size(L::TensorProductOperator) = mapreduce(size, .*, L.ops)
 
-for op in (:adjoint,
-    :transpose)
+for op in (
+        :adjoint,
+        :transpose,
+    )
     @eval function Base.$op(L::TensorProductOperator)
-        TensorProductOperator($op.(L.ops)...;
-            cache = issquare(L.ops[2]) ? L.cache : nothing)
+        return TensorProductOperator(
+            map($op, L.ops)...;
+            cache = issquare(L.ops[2]) ? L.cache : nothing
+        )
     end
 end
 function Base.conj(L::TensorProductOperator)
-    TensorProductOperator(conj.(L.ops)...; cache = L.cache)
+    return TensorProductOperator(map(conj, L.ops)...; cache = L.cache)
 end
 
-function update_coefficients(L::TensorProductOperator, u, p, t)
+function update_coefficients(L::TensorProductOperator, u, p, t; kwargs...)
     ops = ()
     for op in L.ops
-        ops = (ops..., update_coefficients(op, u, p, t))
+        ops = (ops..., update_coefficients(op, u, p, t; kwargs...))
     end
 
-    @reset L.ops = ops
+    return @reset L.ops = ops
 end
 
 getops(L::TensorProductOperator) = L.ops
 
 # Copy method to avoid aliasing
 function Base.copy(L::TensorProductOperator)
-    TensorProductOperator(
+    return TensorProductOperator(
         map(copy, L.ops),
         L.cache === nothing ? nothing : deepcopy(L.cache)
     )
 end
 
-islinear(L::TensorProductOperator) = reduce(&, islinear.(L.ops))
+islinear(L::TensorProductOperator) = mapreduce(islinear, &, L.ops)
 isconvertible(::TensorProductOperator) = false
-Base.iszero(L::TensorProductOperator) = reduce(|, iszero.(L.ops))
-has_adjoint(L::TensorProductOperator) = reduce(&, has_adjoint.(L.ops))
-has_mul(L::TensorProductOperator) = reduce(&, has_mul.(L.ops))
-has_mul!(L::TensorProductOperator) = reduce(&, has_mul!.(L.ops))
-has_ldiv(L::TensorProductOperator) = reduce(&, has_ldiv.(L.ops))
-has_ldiv!(L::TensorProductOperator) = reduce(&, has_ldiv!.(L.ops))
+has_concretization(L::TensorProductOperator) = all(has_concretization, L.ops)
+Base.iszero(L::TensorProductOperator) = mapreduce(iszero, |, L.ops)
+has_adjoint(L::TensorProductOperator) = mapreduce(has_adjoint, &, L.ops)
+has_mul(L::TensorProductOperator) = mapreduce(has_mul, &, L.ops)
+has_mul!(L::TensorProductOperator) = mapreduce(has_mul!, &, L.ops)
+has_ldiv(L::TensorProductOperator) = mapreduce(has_ldiv, &, L.ops)
+has_ldiv!(L::TensorProductOperator) = mapreduce(has_ldiv!, &, L.ops)
 
-factorize(L::TensorProductOperator) = TensorProductOperator(factorize.(L.ops)...)
+factorize(L::TensorProductOperator) = TensorProductOperator(map(factorize, L.ops)...)
+
+"""
+$(TYPEDEF)
+
+Lazy Kronecker sum operator.
+
+# Arguments
+
+  - `outer`: A square matrix or `AbstractSciMLOperator` representing the first
+    term in `outer ⊗ I`.
+  - `inner`: A square matrix or `AbstractSciMLOperator` representing the second
+    term in `I ⊗ inner`.
+
+# Fields
+
+$(FIELDS)
+
+# Interface Rules
+
+`TensorSumOperator(outer, inner)` represents `outer ⊗ I + I ⊗ inner` without
+eagerly forming the Kronecker products. Both input operators must be square.
+The operator forwards state updates to `outer` and `inner`, and its cached
+application stores the two tensor-product terms needed by `mul!`.
+
+`isconvertible(::TensorSumOperator)` is `false` because eager fusion is not the
+default algebra path, but `has_concretization(L)` is `true` when both operands
+can be materialized.
+
+# Examples
+
+```julia
+using LinearAlgebra, SciMLOperators
+
+A = MatrixOperator([1.0 2.0; 3.0 4.0])
+B = MatrixOperator(Diagonal([5.0, 6.0, 7.0]))
+L = TensorSumOperator(A, B)
+
+v = ones(6)
+L * v == Matrix(L) * v
+```
+"""
+struct TensorSumOperator{T, O, P} <: AbstractSciMLOperator{T}
+    ops::O
+    products::P
+
+    function TensorSumOperator(
+            ops::NTuple{2, Union{AbstractMatrix, AbstractSciMLOperator}},
+            products::NTuple{2, AbstractSciMLOperator}
+        )
+        outer, inner = ops
+        @assert issquare(outer)
+        @assert issquare(inner)
+        T = reduce(Base.promote_eltype, ops)
+        return new{T, typeof(ops), typeof(products)}(ops, products)
+    end
+end
+
+function TensorSumOperator(
+        outer::Union{AbstractMatrix, AbstractSciMLOperator},
+        inner::Union{AbstractMatrix, AbstractSciMLOperator}
+    )
+    outer = outer isa AbstractMatrix ? MatrixOperator(outer) : outer
+    inner = inner isa AbstractMatrix ? MatrixOperator(inner) : inner
+    @assert issquare(outer)
+    @assert issquare(inner)
+    products = (
+        TensorProductOperator(outer, IdentityOperator(size(inner, 1))),
+        TensorProductOperator(IdentityOperator(size(outer, 1)), inner),
+    )
+    return TensorSumOperator((outer, inner), products)
+end
+
+"""
+$SIGNATURES
+
+Construct the lazy Kronecker sum `A ⊗ I + I ⊗ B`.
+
+# Arguments
+
+  - `A`: A square matrix or `AbstractSciMLOperator`.
+  - `B`: A square matrix or `AbstractSciMLOperator`.
+
+# Returns
+
+A `TensorSumOperator` whose action is equivalent to
+`kron(A, I(size(B, 1))) + kron(I(size(A, 1)), B)`.
+
+# Interface Rules
+
+Both inputs must be square. Matrix inputs are wrapped in `MatrixOperator` so
+the returned object participates in the `AbstractSciMLOperator` update,
+caching, multiplication, and trait interfaces.
+
+# Examples
+
+```julia
+using LinearAlgebra, SciMLOperators
+
+A = [1.0 2.0; 3.0 4.0]
+B = Diagonal([5.0, 6.0, 7.0])
+L = kronsum(A, B)
+
+v = ones(6)
+L * v == Matrix(L) * v
+```
+"""
+kronsum(A::Union{AbstractMatrix, AbstractSciMLOperator}, B::Union{AbstractMatrix, AbstractSciMLOperator}) = TensorSumOperator(A, B)
+
+Base.convert(::Type{AbstractMatrix}, L::TensorSumOperator) = sum(map(op -> convert(AbstractMatrix, op), L.products))
+
+function Base.show(io::IO, L::TensorSumOperator)
+    print(io, "(")
+    show(io, L.ops[1])
+    print(io, " ⊕ ")
+    show(io, L.ops[2])
+    return print(io, ")")
+end
+
+Base.size(L::TensorSumOperator) = size(first(L.products))
+
+for op in (
+        :adjoint,
+        :transpose,
+    )
+    @eval Base.$op(L::TensorSumOperator) = TensorSumOperator(map($op, L.ops)...)
+end
+Base.conj(L::TensorSumOperator) = TensorSumOperator(map(conj, L.ops)...)
+
+function update_coefficients(L::TensorSumOperator, u, p, t; kwargs...)
+    ops = ()
+    for op in L.ops
+        ops = (ops..., update_coefficients(op, u, p, t; kwargs...))
+    end
+    return TensorSumOperator(ops...)
+end
+
+getops(L::TensorSumOperator) = L.products
+
+function Base.copy(L::TensorSumOperator)
+    return TensorSumOperator(map(copy, L.ops)...)
+end
+
+islinear(L::TensorSumOperator) = all(islinear, L.ops)
+isconvertible(::TensorSumOperator) = false
+has_concretization(L::TensorSumOperator) = all(has_concretization, L.ops)
+Base.iszero(L::TensorSumOperator) = all(iszero, L.ops)
+has_adjoint(L::TensorSumOperator) = all(has_adjoint, L.ops)
+has_mul(L::TensorSumOperator) = all(has_mul, L.ops)
+has_mul!(L::TensorSumOperator) = all(has_mul!, L.ops)
+
+function cache_internals(L::TensorSumOperator, v::AbstractVecOrMat)
+    products = map(op -> cache_operator(op, v), L.products)
+    return TensorSumOperator(L.ops, products)
+end
+
+function Base.:*(L::TensorSumOperator, v::AbstractVecOrMat)
+    return sum(op -> op * v, L.products)
+end
+
+function LinearAlgebra.mul!(w::AbstractVecOrMat, L::TensorSumOperator, v::AbstractVecOrMat)
+    mul!(w, L.products[1], v)
+    mul!(w, L.products[2], v, true, true)
+    return w
+end
+
+function LinearAlgebra.mul!(
+        w::AbstractVecOrMat,
+        L::TensorSumOperator,
+        v::AbstractVecOrMat,
+        α,
+        β
+    )
+    mul!(w, L.products[1], v, α, β)
+    mul!(w, L.products[2], v, α, true)
+    return w
+end
+
+function (L::TensorSumOperator)(v::AbstractVecOrMat, u, p, t; kwargs...)
+    L = update_coefficients(L, u, p, t; kwargs...)
+    return L * v
+end
+
+function (L::TensorSumOperator)(
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t; kwargs...
+    )
+    L = update_coefficients(L, u, p, t; kwargs...)
+    L = cache_operator(L, v)
+    return mul!(w, L, v)
+end
+
+function (L::TensorSumOperator)(
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t, α, β; kwargs...
+    )
+    L = update_coefficients(L, u, p, t; kwargs...)
+    L = cache_operator(L, v)
+    return mul!(w, L, v, α, β)
+end
 
 # operator application
 function Base.:*(L::TensorProductOperator, v::AbstractVecOrMat)
@@ -185,7 +407,7 @@ function Base.:*(L::TensorProductOperator, v::AbstractVecOrMat)
 
     V = outer_mul(L, v, C)
 
-    v isa AbstractMatrix ? reshape(V, (m, k)) : reshape(V, (m,))
+    return v isa AbstractMatrix ? reshape(V, (m, k)) : reshape(V, (m,))
 end
 
 function Base.:\(L::TensorProductOperator, v::AbstractVecOrMat)
@@ -201,7 +423,7 @@ function Base.:\(L::TensorProductOperator, v::AbstractVecOrMat)
 
     V = outer_div(L, v, C)
 
-    v isa AbstractMatrix ? reshape(V, (n, k)) : reshape(V, (n,))
+    return v isa AbstractMatrix ? reshape(V, (n, k)) : reshape(V, (n,))
 end
 
 function cache_self(L::TensorProductOperator, v::AbstractVecOrMat)
@@ -211,16 +433,18 @@ function cache_self(L::TensorProductOperator, v::AbstractVecOrMat)
     mo, no = size(outer)
     k = size(v, 2)
 
+    is_outer_identity = outer isa IdentityOperator
+
     # 3 arg mul!
-    c1 = lmul!(false, similar(v, (mi, no * k))) # c1 = inner * v
-    c2 = lmul!(false, similar(v, (no, mi, k))) # permute (2, 1, 3)
-    c3 = lmul!(false, similar(v, (mo, mi * k))) # c3 = outer * c2
+    c1 = is_outer_identity ? nothing : lmul!(false, similar(v, (mi, no * k))) # c1 = inner * v
+    c2 = is_outer_identity ? nothing : lmul!(false, similar(v, (no, mi, k))) # permute (2, 1, 3)
+    c3 = is_outer_identity ? nothing : lmul!(false, similar(v, (mo, mi * k))) # c3 = outer * c2
 
     # 5 arg mul!
-    c4 = lmul!(false, similar(v, (mo * mi, k))) # cache v in 5 arg mul!
+    c4 = is_outer_identity ? nothing : lmul!(false, similar(v, (mo * mi, k))) # cache v in 5 arg mul!
 
     # 3 arg ldiv!
-    if reduce(&, issquare.(L.ops))
+    if mapreduce(issquare, &, L.ops)
         c5, c6, c7 = c1, c2, c3
     else
         c5 = lmul!(false, similar(v, (ni, mo * k))) # c5 = inner \ v
@@ -229,7 +453,7 @@ function cache_self(L::TensorProductOperator, v::AbstractVecOrMat)
     end
 
     @reset L.cache = (c1, c2, c3, c4, c5, c6, c7)
-    L
+    return L
 end
 
 function cache_internals(L::TensorProductOperator, v::AbstractVecOrMat)
@@ -244,26 +468,28 @@ function cache_internals(L::TensorProductOperator, v::AbstractVecOrMat)
     k = size(v, 2)
 
     vinner = reshape(v, (ni, no * k))
-    vouter = reshape(L.cache[2], (no, mi * k))
+    vouter = reshape(@view(v[1:(no * mi * k)]), (no, mi * k))
 
     @reset L.ops[2] = cache_operator(inner, vinner)
     @reset L.ops[1] = cache_operator(outer, vouter)
-    L
+    return L
 end
 
-function LinearAlgebra.mul!(w::AbstractVecOrMat,
+function LinearAlgebra.mul!(
+        w::AbstractVecOrMat,
         L::TensorProductOperator,
-        v::AbstractVecOrMat)
+        v::AbstractVecOrMat
+    )
     @assert iscached(L) """cache needs to be set up for operator of type
     $L. Set up cache by calling `cache_operator(L, u)`"""
 
     outer, inner = L.ops
 
-    _, ni = size(inner)
-    _, no = size(outer)
+    mi, ni = size(inner)
+    mo, no = size(outer)
     k = size(v, 2)
 
-    C1, C2, C3 = L.cache[1:3]
+    C1 = first(L.cache)
     U = reshape(v, (ni, no * k))
 
     #=
@@ -271,20 +497,24 @@ function LinearAlgebra.mul!(w::AbstractVecOrMat,
         V .= A * U * B'
     =#
 
+    outer isa IdentityOperator && return mul!(reshape(w, (mi, no * k)), inner, U)
+
     # C .= A * U
     mul!(C1, inner, U)
 
     # V .= U * B' <===> V' .= B * C'
     outer_mul!(w, L, v)
 
-    w
+    return w
 end
 
-function LinearAlgebra.mul!(w::AbstractVecOrMat,
+function LinearAlgebra.mul!(
+        w::AbstractVecOrMat,
         L::TensorProductOperator,
         v::AbstractVecOrMat,
         α,
-        β)
+        β
+    )
     @assert iscached(L) """cache needs to be set up for operator of type
     $L. Set up cache by calling `cache_operator(L, u)`"""
 
@@ -302,6 +532,8 @@ function LinearAlgebra.mul!(w::AbstractVecOrMat,
         V .= α * (A * U * B') + β * v
     """
 
+    outer isa IdentityOperator && return mul!(reshape(w, (mi, no * k)), inner, U, α, β)
+
     # C .= A * U
     mul!(C1, inner, U)
 
@@ -309,12 +541,14 @@ function LinearAlgebra.mul!(w::AbstractVecOrMat,
     c = reshape(C1, (mi * no, k))
     outer_mul!(w, L, c, α, β)
 
-    w
+    return w
 end
 
-function LinearAlgebra.ldiv!(w::AbstractVecOrMat,
+function LinearAlgebra.ldiv!(
+        w::AbstractVecOrMat,
         L::TensorProductOperator,
-        v::AbstractVecOrMat)
+        v::AbstractVecOrMat
+    )
     @assert iscached(L) """cache needs to be set up for operator of type
     $L. Set up cache by calling `cache_operator(L, u)`"""
 
@@ -339,7 +573,7 @@ function LinearAlgebra.ldiv!(w::AbstractVecOrMat,
     c = reshape(C5, (ni * mo, k))
     outer_div!(w, L, c)
 
-    w
+    return w
 end
 
 function LinearAlgebra.ldiv!(L::TensorProductOperator, v::AbstractVecOrMat)
@@ -370,11 +604,14 @@ function LinearAlgebra.ldiv!(L::TensorProductOperator, v::AbstractVecOrMat)
     # U .= U / B' <==> U' .= B \ U'
     outer_div!(L, v)
 
-    v
+    return v
 end
 
 # helper functions
 const PERM = (2, 1, 3)
+
+_has_tensor_outer_mul_fast(outer) = false
+function _tensor_outer_mul_fast! end
 
 function outer_mul(L::TensorProductOperator, v::AbstractVecOrMat, C::AbstractVecOrMat)
     outer, inner = L.ops
@@ -402,7 +639,7 @@ function outer_mul(L::TensorProductOperator, v::AbstractVecOrMat, C::AbstractVec
     V = reshape(V, (mo, mi, k))
     V = permutedims(V, PERM)
 
-    V
+    return V
 end
 
 function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator, v::AbstractVecOrMat)
@@ -410,10 +647,7 @@ function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator, v::AbstractVe
 
     C1 = first(L.cache)
 
-    if outer isa IdentityOperator
-        copyto!(w, C1)
-        return w
-    elseif outer isa ScaledOperator
+    if outer isa ScaledOperator
         outer_mul!(w, outer.L, v)
         lmul!(outer.λ, w)
         return w
@@ -431,6 +665,11 @@ function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator, v::AbstractVe
         return w
     end
 
+    if _has_tensor_outer_mul_fast(outer)
+        _tensor_outer_mul_fast!(w, outer, C1, mi, mo, no, k)
+        return w
+    end
+
     C2, C3 = L.cache[2:3]
 
     C1 = reshape(C1, (mi, no, k))
@@ -441,21 +680,19 @@ function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator, v::AbstractVe
     W = reshape(w, (mi, mo, k))
     permutedims!(W, C3, PERM)
 
-    w
+    return w
 end
 
-function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator,
-        v::AbstractVecOrMat, α, β)
+function outer_mul!(
+        w::AbstractVecOrMat, L::TensorProductOperator,
+        v::AbstractVecOrMat, α, β
+    )
     outer, inner = L.ops
 
     m, _ = size(L)
     k = size(v, 2)
 
-    if outer isa IdentityOperator
-        v = reshape(v, (m, k))
-        axpby!(α, v, β, w)
-        return w
-    elseif outer isa ScaledOperator
+    if outer isa ScaledOperator
         a = convert(Number, α * outer.λ)
         outer_mul!(w, outer.L, v, a, β)
         return w
@@ -471,6 +708,11 @@ function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator,
         return w
     end
 
+    if _has_tensor_outer_mul_fast(outer)
+        _tensor_outer_mul_fast!(w, outer, v, mi, mo, no, k, α, β)
+        return w
+    end
+
     C2, C3, c4 = L.cache[2:4]
 
     C = reshape(v, (mi, no, k))
@@ -483,7 +725,7 @@ function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator,
     permutedims!(W, C3, PERM)
     axpby!(β, c4, α, w)
 
-    w
+    return w
 end
 
 function outer_div(L::TensorProductOperator, v::AbstractVecOrMat, C::AbstractVecOrMat)
@@ -511,7 +753,7 @@ function outer_div(L::TensorProductOperator, v::AbstractVecOrMat, C::AbstractVec
     V = reshape(V, (no, ni, k))
     V = permutedims(V, PERM)
 
-    V
+    return V
 end
 
 function outer_div!(v::AbstractVecOrMat, L::TensorProductOperator, c::AbstractVecOrMat)
@@ -547,7 +789,7 @@ function outer_div!(v::AbstractVecOrMat, L::TensorProductOperator, c::AbstractVe
     V = reshape(v, (ni, no, k))
     permutedims!(V, C7, PERM)
 
-    v
+    return v
 end
 
 function outer_div!(L::TensorProductOperator, v::AbstractVecOrMat)
@@ -582,18 +824,19 @@ function outer_div!(L::TensorProductOperator, v::AbstractVecOrMat)
     C = reshape(C, (no, ni, k))
     permutedims!(U, C, PERM)
 
-    v
+    return v
 end
 
 # Out-of-place: v is action vector, u is update vector
 function (L::TensorProductOperator)(v::AbstractVecOrMat, u, p, t; kwargs...)
     L = update_coefficients(L, u, p, t; kwargs...)
-    L * v
+    return L * v
 end
 
 # In-place: w is destination, v is action vector, u is update vector
 function (L::TensorProductOperator)(
-        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t; kwargs...)
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t; kwargs...
+    )
     update_coefficients!(L, u, p, t; kwargs...)
     mul!(w, L, v)
     return w
@@ -601,7 +844,8 @@ end
 
 # In-place with scaling: w = α*(L*v) + β*w
 function (L::TensorProductOperator)(
-        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t, α, β; kwargs...)
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t, α, β; kwargs...
+    )
     update_coefficients!(L, u, p, t; kwargs...)
     mul!(w, L, v, α, β)
     return w

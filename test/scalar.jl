@@ -1,13 +1,14 @@
 using SciMLOperators
 using SciMLOperators: AbstractSciMLScalarOperator,
-                      ComposedScalarOperator,
-                      AddedScalarOperator,
-                      InvertedScalarOperator,
-                      IdentityOperator,
-                      AddedOperator,
-                      ScaledOperator
+    ComposedScalarOperator,
+    AddedScalarOperator,
+    InvertedScalarOperator,
+    IdentityOperator,
+    AddedOperator,
+    ScaledOperator
 
 using LinearAlgebra, Random, Test
+using ArrayInterface
 
 Random.seed!(0)
 N = 8
@@ -30,6 +31,8 @@ K = 12
 
     @test size(α) == ()
     @test isconstant(α)
+    @test !ArrayInterface.issingular(α)
+    @test ArrayInterface.issingular(ScalarOperator(0.0))
 
     # Original lmul!/rmul! tests
     v = copy(u)
@@ -56,6 +59,11 @@ K = 12
     a_scalar = rand()
     aa = ScalarOperator(a_scalar)
     @test axpy!(aa, X, Y) ≈ a_scalar * X + Z
+
+    expα = exp(α)
+    @test expα isa ScalarOperator
+    @test convert(Number, expα) ≈ exp(x)
+    @test expα * u ≈ exp(x) * u
 
     # Tests with the new interface
     v = copy(u)  # Action vector
@@ -121,6 +129,10 @@ end
     @inferred convert(Float32, β)
     @test convert(Number, β) ≈ true
 
+    β = exp(α + α)
+    @test β isa ScalarOperator
+    @test β(v, u, nothing, 0.0) ≈ exp(2x) * v
+
     # Test combination with other operators
     for op in (MatrixOperator(rand(N, N)), SciMLOperators.IdentityOperator(N))
         @test α + op isa SciMLOperators.AddedOperator
@@ -138,8 +150,12 @@ end
         @test L(v, u, nothing, 0.0) ≈ x * (op * v)
 
         # Division tests from original
-        @test all(map(T -> (T isa SciMLOperators.ScaledOperator),
-            (α / op, op / α, op \ α, α \ op)))
+        @test all(
+            map(
+                T -> (T isa SciMLOperators.ScaledOperator),
+                (α / op, op / α, op \ α, α \ op)
+            )
+        )
         @test (α / op) * u ≈ (op \ α) * u ≈ α * (op \ u)
         @test (op / α) * u ≈ (α \ op) * u ≈ 1 / α * op * u
     end
@@ -223,8 +239,10 @@ end
     @test convert(Number, num) ≈ val
 
     # Test with keyword arguments
-    γ = ScalarOperator(0.0; update_func = (args...; dtgamma) -> dtgamma,
-        accepted_kwargs = Val((:dtgamma,)))
+    γ = ScalarOperator(
+        0.0; update_func = (args...; dtgamma) -> dtgamma,
+        accepted_kwargs = Val((:dtgamma,))
+    )
 
     dtgamma = rand()
     # Original tests
@@ -255,4 +273,7 @@ end
     w_orig = copy(w_test)
     γ_added(w_test, v, u, p, t, c, d; dtgamma)
     @test w_test ≈ c * (dtgamma + p) * v + d * w_orig
+
+    δ = exp(γ)
+    @test δ(v, u, p, t; dtgamma) ≈ exp(dtgamma) * v
 end

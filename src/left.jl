@@ -6,40 +6,46 @@
 for op in (:*, :\)
     @eval function Base.$op(u::AbstractVecOrMat, L::AbstractSciMLOperator)
         oper = u isa Transpose ? transpose : adjoint
-        $op(oper(L), oper(u)) |> oper
+        return $op(oper(L), oper(u)) |> oper
     end
 end
 
-function LinearAlgebra.mul!(v::AbstractVecOrMat,
+function LinearAlgebra.mul!(
+        v::AbstractVecOrMat,
         u::AbstractVecOrMat,
-        L::AbstractSciMLOperator)
+        L::AbstractSciMLOperator
+    )
     op = (u isa Transpose) | (v isa Transpose) ? transpose : adjoint
     mul!(op(v), op(L), op(u))
-    v
+    return v
 end
 
-function LinearAlgebra.mul!(v::AbstractVecOrMat,
+function LinearAlgebra.mul!(
+        v::AbstractVecOrMat,
         u::AbstractVecOrMat,
         L::AbstractSciMLOperator,
         α,
-        β)
+        β
+    )
     op = (u isa Transpose) | (v isa Transpose) ? transpose : adjoint
     mul!(op(v), op(L), op(u), α, β)
-    v
+    return v
 end
 
-function LinearAlgebra.ldiv!(v::AbstractVecOrMat,
+function LinearAlgebra.ldiv!(
+        v::AbstractVecOrMat,
         u::AbstractVecOrMat,
-        L::AbstractSciMLOperator)
+        L::AbstractSciMLOperator
+    )
     op = (u isa Transpose) | (v isa Transpose) ? transpose : adjoint
     ldiv!(op(v), op(L), op(u))
-    v
+    return v
 end
 
 function LinearAlgebra.ldiv!(u::AbstractVecOrMat, L::AbstractSciMLOperator)
     op = (u isa Transpose) ? transpose : adjoint
     ldiv!(op(L), op(u))
-    u
+    return u
 end
 
 ###
@@ -53,7 +59,7 @@ struct AdjointOperator{T, LType} <: AbstractSciMLOperator{T}
     L::LType
 
     function AdjointOperator(L::AbstractSciMLOperator{T}) where {T}
-        new{T, typeof(L)}(L)
+        return new{T, typeof(L)}(L)
     end
 end
 
@@ -64,7 +70,7 @@ struct TransposedOperator{T, LType} <: AbstractSciMLOperator{T}
     L::LType
 
     function TransposedOperator(L::AbstractSciMLOperator{T}) where {T}
-        new{T, typeof(L)}(L)
+        return new{T, typeof(L)}(L)
     end
 end
 
@@ -82,22 +88,29 @@ Base.adjoint(L::TransposedOperator) = conj(L.L)
 
 function Base.show(io::IO, L::AdjointOperator)
     show(io, L.L)
-    print(io, "'")
+    return print(io, "'")
 end
 
 function Base.show(io::IO, L::TransposedOperator)
     print(io, "transpose(")
     show(io, L.L)
-    print(io, ")")
+    return print(io, ")")
 end
 
-for (op, LType, VType) in ((:adjoint, :AdjointOperator, :AbstractAdjointVecOrMat),
-    (:transpose, :TransposedOperator, :AbstractTransposedVecOrMat))
+for (op, LType, VType) in (
+        (:adjoint, :AdjointOperator, :AbstractAdjointVecOrMat),
+        (:transpose, :TransposedOperator, :AbstractTransposedVecOrMat),
+    )
     # constructor
     @eval Base.$op(L::AbstractSciMLOperator) = $LType(L)
 
-    @eval Base.convert(::Type{AbstractMatrix}, L::$LType) = $op(convert(AbstractMatrix,
-        L.L))
+    @eval Base.convert(::Type{AbstractMatrix}, L::$LType) = $op(
+        convert(
+            AbstractMatrix,
+            L.L
+        )
+    )
+    @eval has_concretization(L::$LType) = has_concretization(L.L)
 
     # traits
     @eval Base.size(L::$LType) = size(L.L) |> reverse
@@ -109,23 +122,23 @@ for (op, LType, VType) in ((:adjoint, :AdjointOperator, :AbstractAdjointVecOrMat
     # Copy method to avoid aliasing
     @eval Base.copy(L::$LType) = $LType(copy(L.L))
 
-    @eval @forward $LType.L (
-        # LinearAlgebra
-        LinearAlgebra.issymmetric,
-        LinearAlgebra.ishermitian,
-        LinearAlgebra.isposdef,
-        LinearAlgebra.opnorm,
+    # Method forwarding (previously using @forward from MacroTools)
+    # LinearAlgebra methods
+    @eval LinearAlgebra.issymmetric(L::$LType) = LinearAlgebra.issymmetric(L.L)
+    @eval LinearAlgebra.ishermitian(L::$LType) = LinearAlgebra.ishermitian(L.L)
+    @eval LinearAlgebra.isposdef(L::$LType) = LinearAlgebra.isposdef(L.L)
+    @eval LinearAlgebra.opnorm(L::$LType) = LinearAlgebra.opnorm(L.L)
 
-        # SciML
-        isconstant,
-        has_mul,
-        has_mul!,
-        has_ldiv,
-        has_ldiv!)
+    # SciML methods
+    @eval isconstant(L::$LType) = isconstant(L.L)
+    @eval has_mul(L::$LType) = has_mul(L.L)
+    @eval has_mul!(L::$LType) = has_mul!(L.L)
+    @eval has_ldiv(L::$LType) = has_ldiv(L.L)
+    @eval has_ldiv!(L::$LType) = has_ldiv!(L.L)
 
     @eval function cache_internals(L::$LType, u::AbstractVecOrMat)
         @reset L.L = cache_operator(L.L, reshape(u, size(L, 1)))
-        L
+        return L
     end
 
     # operator application
@@ -136,28 +149,28 @@ for (op, LType, VType) in ((:adjoint, :AdjointOperator, :AbstractAdjointVecOrMat
     # v  ← A  * u
     @eval function LinearAlgebra.mul!(v::$VType, u::$VType, L::$LType)
         mul!(v.parent, L.L, u.parent)
-        v
+        return v
     end
 
     # v' ← α * (u' * A') + β * v'
     # v  ← α * (A  * u ) + β * v
     @eval function LinearAlgebra.mul!(v::$VType, u::$VType, L::$LType, α, β)
         mul!(v.parent, L.L, u.parent, α, β)
-        v
+        return v
     end
 
     # v' ← u' / A'
     # v  ← A  \ u
     @eval function LinearAlgebra.ldiv!(v::$VType, u::$VType, L::$LType)
         ldiv!(v.parent, L.L, u.parent)
-        v
+        return v
     end
 
     # u' ← u' / A'
     # u  ← A  \ u
     @eval function LinearAlgebra.ldiv!(u::$VType, L::$LType)
         ldiv!(L.L, u.parent)
-        u
+        return u
     end
 end
 
@@ -166,7 +179,7 @@ end
 function (L::AdjointOperator)(v::AbstractVecOrMat, u, p, t; kwargs...)
     # Adjoint operator applied to v means L.L' * v
     # For matrices: (A')v = (v'A)'
-    # This means we need to compute L.L(v', u, p, t)' 
+    # This means we need to compute L.L(v', u, p, t)'
     # Update the operator first, then apply adjoint operator
     L_updated = update_coefficients(L.L, u, p, t; kwargs...)
     # (A')v = (v'A)' where v'A is computed by A'*v'
@@ -184,7 +197,8 @@ end
 
 # In-place with scaling: w = α*(L*v) + β*w
 function (L::AdjointOperator)(
-        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t, α, β; kwargs...)
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t, α, β; kwargs...
+    )
     # Update the operator in-place
     update_coefficients!(L.L, u, p, t; kwargs...)
     mul!(w', v', L.L, α, β)
@@ -201,7 +215,8 @@ end
 
 # In-place
 function (L::TransposedOperator)(
-        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t; kwargs...)
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t; kwargs...
+    )
     update_coefficients!(L.L, u, p, t; kwargs...)
     mul!(w', v', L.L)
     return w
@@ -209,7 +224,8 @@ end
 
 # In-place with scaling
 function (L::TransposedOperator)(
-        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t, α, β; kwargs...)
+        w::AbstractVecOrMat, v::AbstractVecOrMat, u, p, t, α, β; kwargs...
+    )
     update_coefficients!(L.L, u, p, t; kwargs...)
     mul!(w', v', L.L, α, β)
     return w

@@ -3,21 +3,26 @@ $(README)
 """
 module SciMLOperators
 
-using DocStringExtensions
+using DocStringExtensions: DocStringExtensions, FIELDS, README, SIGNATURES, TYPEDEF
 
-using LinearAlgebra
+using LinearAlgebra: LinearAlgebra, Adjoint, Bidiagonal, Factorization, I,
+    Transpose, UniformScaling, axpby!, axpy!, ishermitian,
+    isposdef, issuccess, issymmetric, lu, opnorm
 
 import ArrayInterface
-import MacroTools: @forward
+# MacroTools dependency removed - using explicit method forwarding instead
 import Accessors: @reset
+
+using Adapt: Adapt
 
 # overload
 import Base: show
-import Base: zero, one, oneunit
-import Base: +, -, *, /, \, ∘, ==, conj, exp, kron
+import Base: zero, one
+import Base: +, -, *, /, \, ==, conj, exp, kron
 import Base: iszero, inv, adjoint, transpose, size, convert
+import Base: Matrix
 import LinearAlgebra: mul!, ldiv!, lmul!, rmul!, factorize
-import LinearAlgebra: Matrix, Diagonal
+import LinearAlgebra: Diagonal
 
 # Used for downstream checking
 const isv1 = true
@@ -42,7 +47,7 @@ where `L[v]` is the operator application of ``L`` on the vector ``v``.
 
 ## Interface
 
-An `AbstractSciMLOperator` can be called  like a function in the following ways:
+An `AbstractSciMLOperator` can be called like a function in the following ways:
 
   - `L(v, u, p, t)` - Out-of-place application where `v` is the action vector and `u` is the update vector
   - `L(w, v, u, p, t)` - In-place application where `w` is the destination, `v` is the action vector, and `u` is the update vector
@@ -59,6 +64,43 @@ An `AbstractSciMLOperator` behaves like a matrix in these methods.
 Allocation-free methods, suffixed with a `!` often need cache arrays.
 To precache an `AbstractSciMLOperator`, call the function
 `L = cache_operator(L, input_vector)`.
+
+## Required Interface For Subtypes
+
+A concrete subtype must define `Base.size(L)` and one of the following
+application paths:
+
+  - `Base.:*(L, v)` for out-of-place matrix-like application.
+  - `LinearAlgebra.mul!(w, L, v)` and, when `has_mul!(L)` is `true`,
+    `LinearAlgebra.mul!(w, L, v, α, β)` for in-place application.
+  - `Base.convert(AbstractMatrix, L)` when `isconvertible(L)` is `true`.
+
+If the operator state depends on `(u, p, t)` or accepted keyword arguments,
+the subtype must implement `update_coefficients` for out-of-place state
+updates or `update_coefficients!` for in-place state updates. Composite
+operators assume these update methods may be called recursively on every
+operator returned by `getops(L)`.
+
+Subtypes that need preallocated work arrays for allocation-free application
+must implement `cache_self(L, v)` for their own caches, `cache_internals(L, v)`
+for child-operator caches, or both. `cache_operator(L, v)` calls these hooks
+and downstream solvers may call it before repeated `mul!` evaluations.
+
+## Trait Rules
+
+Trait functions such as `isconstant`, `islinear`, `isconvertible`,
+`has_concretization`, `has_mul`, `has_mul!`, `has_ldiv`, and `has_ldiv!`
+are part of the public operator interface. A trait returning `true` is a
+promise that the corresponding operation is valid for inputs with compatible
+sizes. For example, `has_mul!(L)` means `mul!(w, L, v)` is available, and
+`has_concretization(L)` means either `convert(AbstractMatrix, L)` or
+`convert(Number, L)` can materialize the operator state without changing its
+mathematical action.
+
+`isconstant(L)` means repeated calls to `update_coefficients[!]` are not
+required to keep `L` current. `islinear(L)` means the action is linear in
+the vector being multiplied; state dependence on `(u, p, t)` is still allowed
+for a linear operator.
 
 ## Overloaded Actions
 
@@ -206,39 +248,61 @@ include("left.jl")
 include("scalar.jl")
 include("matrix.jl")
 include("basic.jl")
+include("block.jl")
 include("batch.jl")
 include("func.jl")
 include("tensor.jl")
 include("woperator.jl")
+include("adapt.jl")
 
 export
-       IdentityOperator,
-       NullOperator,
-       ScalarOperator,
-       MatrixOperator,
-       DiagonalOperator,
-       InvertibleOperator,
-       AffineOperator,
-       AddVector,
-       FunctionOperator,
-       TensorProductOperator,
-       WOperator,
-       StaticWOperator
+    IdentityOperator,
+    NullOperator,
+    ScalarOperator,
+    MatrixOperator,
+    DiagonalOperator,
+    InvertibleOperator,
+    AffineOperator,
+    AddVector,
+    FunctionOperator,
+    BlockDiagonalOperator,
+    TensorProductOperator,
+    TensorSumOperator,
+    WOperator,
+    StaticWOperator
 
 export update_coefficients!,
-       update_coefficients, isconstant,
-       iscached,
-       cache_operator, issquare,
-       islinear,
-       concretize,
-       isconvertible, has_adjoint,
-       has_expmv,
-       has_expmv!,
-       has_exp,
-       has_mul,
-       has_mul!,
-       has_ldiv,
-       has_ldiv!,
-       has_concretization
+    update_coefficients, isconstant,
+    iscached,
+    cache_operator, issquare,
+    islinear,
+    concretize,
+    isconvertible, has_adjoint,
+    has_expmv,
+    has_expmv!,
+    has_exp,
+    has_mul,
+    has_mul!,
+    has_ldiv,
+    has_ldiv!,
+    has_concretization,
+    kronsum
+
+# Documented (see docs/src/interface.md, docs/src/premade_operators.md) but
+# not exported: the core abstract types every downstream dispatches on and the
+# lazy-algebra result types. Declared public so downstream packages that
+# qualify these names pass ExplicitImports' public-API checks. The `:public`
+# expression head is only available on Julia >= 1.11, so guard the declaration.
+@static if VERSION >= v"1.11.0-DEV.469"
+    eval(
+        Expr(
+            :public,
+            :AbstractSciMLOperator, :AbstractSciMLScalarOperator,
+            :ScaledOperator, :AddedOperator, :ComposedOperator,
+            :InvertedOperator, :AdjointOperator, :TransposedOperator,
+            :AddedScalarOperator, :ComposedScalarOperator, :InvertedScalarOperator
+        )
+    )
+end
 
 end # module

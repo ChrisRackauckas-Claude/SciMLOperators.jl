@@ -8,10 +8,18 @@ SciMLOperators.NullOperator
 ScalarOperator
 MatrixOperator
 DiagonalOperator
+SciMLOperators.BatchedDiagonalOperator
 AffineOperator
 AddVector
 FunctionOperator
+BlockDiagonalOperator
 TensorProductOperator
+SciMLOperators.:⊗
+Base.kron
+TensorSumOperator
+kronsum
+WOperator
+SciMLOperators.StaticWOperator
 ```
 
 ## Lazy Scalar Operator Combination

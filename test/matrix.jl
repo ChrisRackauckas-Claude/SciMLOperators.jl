@@ -1,6 +1,8 @@
 using SciMLOperators, LinearAlgebra
+using SparseArrays
 using Random
 using Test
+using LoopVectorization
 
 using SciMLOperators: InvertibleOperator, InvertedOperator, ⊗, AbstractSciMLOperator
 using FFTW
@@ -135,9 +137,11 @@ end
     α = rand()
     β = rand()
 
-    L = MatrixOperator(zeros(N, N);
+    L = MatrixOperator(
+        zeros(N, N);
         update_func = (A, u, p, t) -> p * p',
-        update_func! = (A, u, p, t) -> A .= p * p')
+        update_func! = (A, u, p, t) -> A .= p * p'
+    )
 
     @test !isconstant(L)
 
@@ -161,31 +165,33 @@ end
     L(w, v, u, p, t, α, β)
     @test w ≈ α * (A * v) + β * orig_w
 
-    A = [-2.0 1 0 0 0
-         1 -2 1 0 0
-         0 1 -2 1 0
-         0 0 1 -2 1
-         0 0 0 1 -2]
+    A = [
+        -2.0 1 0 0 0
+        1 -2 1 0 0
+        0 1 -2 1 0
+        0 0 1 -2 1
+        0 0 0 1 -2
+    ]
     v = [3.0, 2.0, 1.0, 2.0, 3.0]
     opA = MatrixOperator(A)
 
     function update_function!(B, u, p, t)
         dt = p
-        B .= A .* u + dt*I
+        B .= A .* u + dt * I
     end
 
-    u = Array(1:1.0:5);
-    p = 0.1;
+    u = Array(1:1.0:5)
+    p = 0.1
     t = 0.0
     opB = MatrixOperator(copy(A); update_func! = update_function!)
 
     function Bfunc!(w, v, u, p, t)
         dt = p
-        w[1] = -(2*u[1]-dt)*v[1] + v[2]*u[1]
+        w[1] = -(2 * u[1] - dt) * v[1] + v[2] * u[1]
         for i in 2:4
-            w[i] = v[i - 1]*u[i] - (2*u[i]-dt)*v[i] + v[i + 1]*u[i]
+            w[i] = v[i - 1] * u[i] - (2 * u[i] - dt) * v[i] + v[i + 1] * u[i]
         end
-        w[5] = v[4]*u[5] - (2*u[5]-dt)*v[5]
+        w[5] = v[4] * u[5] - (2 * u[5] - dt) * v[5]
         nothing
     end
 
@@ -197,8 +203,10 @@ end
 
     mfopB = FunctionOperator(Bfunc!, zeros(5), zeros(5); u, p, t, isconstant = false)
 
-    @test iszero(opB(v, Array(2:1.0:6), 0.5, nothing) -
-                 mfopB(v, Array(2:1.0:6), 0.5, nothing))
+    @test iszero(
+        opB(v, Array(2:1.0:6), 0.5, nothing) -
+            mfopB(v, Array(2:1.0:6), 0.5, nothing)
+    )
 end
 
 @testset "DiagonalOperator update test" begin
@@ -212,9 +220,11 @@ end
     α = rand()
     β = rand()
 
-    D = DiagonalOperator(zeros(N);
+    D = DiagonalOperator(
+        zeros(N);
         update_func = (diag, u, p, t) -> p * t,
-        update_func! = (diag, u, p, t) -> diag .= p * t)
+        update_func! = (diag, u, p, t) -> diag .= p * t
+    )
 
     @test !isconstant(D)
     @test issquare(D)
@@ -236,6 +246,11 @@ end
     orig_w = copy(w)
     D(w, v, u, p, t, α, β)
     @test w ≈ α * expected + β * orig_w
+
+    expD = exp(D)
+    @test expD isa MatrixOperator
+    @test expD.A isa Diagonal
+    @test expD(v, u, p, t) ≈ exp.(p * t) .* v
 end
 
 @testset "Batched Diagonal Operator" begin
@@ -294,9 +309,11 @@ end
     p = rand(N, K)
     t = rand()
 
-    D = DiagonalOperator(d;
+    D = DiagonalOperator(
+        d;
         update_func = (diag, u, p, t) -> p * t,
-        update_func! = (diag, u, p, t) -> diag .= p * t)
+        update_func! = (diag, u, p, t) -> diag .= p * t
+    )
 
     @test !isconstant(D)
     @test issquare(D)
@@ -439,9 +456,11 @@ end
     α = rand()
     β = rand()
 
-    L = AffineOperator(A, B, zeros(N, K);
+    L = AffineOperator(
+        A, B, zeros(N, K);
         update_func = (b, u, p, t) -> p * t,
-        update_func! = (b, u, p, t) -> b .= p * t)
+        update_func! = (b, u, p, t) -> b .= p * t
+    )
 
     @test !isconstant(L)
 
@@ -491,10 +510,10 @@ end
 
     # test Base.kron overload
     _A = rand(N, N)
-    @test kron(_A, MatrixOperator(_A)) isa TensorProductOperator
-    @test kron(MatrixOperator(_A), _A) isa TensorProductOperator
+    @test kron(_A, MatrixOperator(_A)) isa TensorProductOperator{Float64}
+    @test kron(MatrixOperator(_A), _A) isa TensorProductOperator{Float64}
 
-    @test kron(MatrixOperator(_A), MatrixOperator(_A)) isa TensorProductOperator
+    @test kron(MatrixOperator(_A), MatrixOperator(_A)) isa TensorProductOperator{Float64}
 
     # Inputs/Update vectors
     u2 = rand(n1 * n2, K)
@@ -511,8 +530,8 @@ end
     opAB = TensorProductOperator(A, B)
     opABC = TensorProductOperator(A, B, C)
 
-    @test opAB isa TensorProductOperator
-    @test opABC isa TensorProductOperator
+    @test opAB isa TensorProductOperator{Float64}
+    @test opABC isa TensorProductOperator{Float64}
 
     @test isconstant(opAB)
     @test isconstant(opABC)
@@ -538,8 +557,8 @@ end
     @test isconstant(opAB_F)
     @test isconstant(opABC_F)
 
-    @test opAB_F isa TensorProductOperator
-    @test opABC_F isa TensorProductOperator
+    @test opAB_F isa TensorProductOperator{Float64}
+    @test opABC_F isa TensorProductOperator{Float64}
 
     @test AB ≈ convert(AbstractMatrix, opAB_F)
     @test ABC ≈ convert(AbstractMatrix, opABC_F)
@@ -642,4 +661,178 @@ end
         w3 = zeros(N3, K)    # Output vector
         @test_broken ldiv!(w3, opABC_F, v3) ≈ ABC \ v3 # errors
     end
+
+    @testset "Simplified Structure with IdentityOperator" begin
+        Id1 = IdentityOperator(m1)
+        Id2 = IdentityOperator(m2)
+        Id3 = IdentityOperator(m3)
+        A1 = MatrixOperator(rand(n1, n1))
+        A2 = MatrixOperator(rand(n2, n2))
+
+        op1 = kron(A1, Id1, Id2, Id3)
+        op2 = kron(Id1, A1, Id2, Id3)
+        op3 = kron(Id1, Id2, A1, Id3)
+        op4 = kron(Id1, Id2, Id3, A1)
+
+        op5 = kron(A1, A2, Id1, Id2)
+        op6 = kron(Id1, A1, A2, Id2)
+        op7 = kron(Id1, Id2, A1, A2)
+
+        # Test the structure of the resulting operators
+        # The nesting depth structure should be 2 at most
+        @test op1.ops[1] isa MatrixOperator
+        @test op1.ops[2] isa IdentityOperator
+
+        @test op2.ops[1] isa TensorProductOperator
+        @test op2.ops[2] isa IdentityOperator
+        @test op2.ops[1].ops[1] isa IdentityOperator
+        @test op2.ops[1].ops[2] isa MatrixOperator
+
+        @test op3.ops[1] isa TensorProductOperator
+        @test op3.ops[2] isa IdentityOperator
+        @test op3.ops[1].ops[1] isa IdentityOperator
+        @test op3.ops[1].ops[2] isa MatrixOperator
+
+        @test op4.ops[1] isa IdentityOperator
+        @test op4.ops[2] isa MatrixOperator
+
+        @test op5.ops[1] isa MatrixOperator
+        @test op5.ops[2] isa TensorProductOperator
+        @test op5.ops[2].ops[1] isa MatrixOperator
+        @test op5.ops[2].ops[2] isa IdentityOperator
+
+        @test op6.ops[1] isa TensorProductOperator
+        @test op6.ops[2] isa TensorProductOperator
+        @test op6.ops[1].ops[1] isa IdentityOperator
+        @test op6.ops[1].ops[2] isa MatrixOperator
+        @test op6.ops[2].ops[1] isa MatrixOperator
+        @test op6.ops[2].ops[2] isa IdentityOperator
+
+        @test op7.ops[1] isa TensorProductOperator
+        @test op7.ops[2] isa MatrixOperator
+        @test op7.ops[1].ops[1] isa IdentityOperator
+        @test op7.ops[1].ops[2] isa MatrixOperator
+
+        @test convert(AbstractMatrix, op1) ≈ kron(convert(AbstractMatrix, A1), I(m1 * m2 * m3))
+        @test convert(AbstractMatrix, op2) ≈ kron(I(m1), convert(AbstractMatrix, A1), I(m2 * m3))
+        @test convert(AbstractMatrix, op3) ≈ kron(I(m1 * m2), convert(AbstractMatrix, A1), I(m3))
+        @test convert(AbstractMatrix, op4) ≈ kron(I(m1 * m2 * m3), convert(AbstractMatrix, A1))
+
+        @test convert(AbstractMatrix, op5) ≈ kron(
+            convert(AbstractMatrix, A1), convert(AbstractMatrix, A2), I(m1 * m2)
+        )
+        @test convert(AbstractMatrix, op6) ≈ kron(
+            I(m1), convert(AbstractMatrix, A1), convert(AbstractMatrix, A2), I(m2)
+        )
+        @test convert(AbstractMatrix, op7) ≈ kron(
+            I(m1 * m2), convert(AbstractMatrix, A1), convert(AbstractMatrix, A2)
+        )
+
+        for op in (op1, op2, op3, op4, op5, op6, op7)
+            v = rand(size(op, 2), K)
+            @test convert(AbstractMatrix, op) * v ≈ op * v
+        end
+
+    end
+end
+
+@testset "TensorSumOperator" begin
+    A = rand(3, 3)
+    B = rand(4, 4)
+    α = rand()
+    β = rand()
+    p = nothing
+    t = 0.0
+
+    expected = kron(A, Matrix(I, 4, 4)) + kron(Matrix(I, 3, 3), B)
+    L = kronsum(MatrixOperator(A), MatrixOperator(B))
+    L_from_matrices = kronsum(A, B)
+
+    @test L isa TensorSumOperator{Float64}
+    @test L_from_matrices isa TensorSumOperator{Float64}
+    @test size(L) == size(expected)
+    @test islinear(L)
+    @test isconstant(L)
+    @test !iscached(L)
+    @test convert(AbstractMatrix, L) ≈ expected
+    @test convert(AbstractMatrix, L_from_matrices) ≈ expected
+
+    u = rand(size(L, 2), K)
+    v = copy(u)
+    w = zeros(size(L, 1), K)
+
+    @test L * v ≈ expected * v
+    @test L(v, u, p, t) ≈ expected * v
+
+    L = cache_operator(L, u)
+    @test iscached(L)
+
+    mul!(w, L, v)
+    @test w ≈ expected * v
+
+    copy!(w, rand(size(L, 1), K))
+    orig_w = copy(w)
+    mul!(w, L, v, α, β)
+    @test w ≈ α * expected * v + β * orig_w
+
+    copy!(w, zeros(size(L, 1), K))
+    L(w, v, u, p, t)
+    @test w ≈ expected * v
+
+    copy!(w, rand(size(L, 1), K))
+    orig_w = copy(w)
+    L(w, v, u, p, t, α, β)
+    @test w ≈ α * expected * v + β * orig_w
+
+    x = rand(size(L, 2))
+    @test L * x ≈ expected * x
+    @test convert(AbstractMatrix, L') ≈ expected'
+    @test convert(AbstractMatrix, transpose(L)) ≈ transpose(expected)
+    @test_throws AssertionError kronsum(rand(3, 4), B)
+
+    A_update = MatrixOperator(zeros(3, 3); update_func = (A, u, p, t) -> p[1] * Matrix(I, 3, 3))
+    B_update = MatrixOperator(zeros(4, 4); update_func = (B, u, p, t) -> p[2] * Matrix(I, 4, 4))
+    L_update = kronsum(A_update, B_update)
+    @test L_update(v, u, (2.0, 3.0), t) ≈ 5v
+end
+
+@testset "Sparse conversion tests" begin
+    A = rand(2, 2)
+    opA = MatrixOperator(A)
+    # Construct operator including TensorProductOperator, AddedOperator,
+    # IdentityOperator, ComposedOperator and ScaledOperator:
+    opB = kron(2 * opA + I, opA * opA)
+    B = kron(2 * A + I, A * A)
+    opB_sparse = sparse(opB)
+    @test opB_sparse ≈ B
+    @test issparse(opB_sparse)
+
+    L = BlockDiagonalOperator(opA, opB, NullOperator(2, 3))
+    sL = sparse(L)
+    @test issparse(sL)
+    @test sL ≈ Matrix(L)
+
+    # TensorSumOperator
+    Lkronsum = kronsum(opB, opB)
+    sLkronsum = sparse(Lkronsum)
+    @test issparse(sLkronsum)
+    @test sLkronsum ≈ Matrix(Lkronsum)
+end
+
+@testset "copyto! MatrixOperator <- MatrixOperator delegates to .A" begin
+    # A MatrixOperator rhs must be unwrapped so the copy hits the underlying matrices'
+    # specialized copyto! (sparse->sparse copies nzval/rowval/colptr) rather than the
+    # generic element-wise fallback.
+    for Amk in (() -> rand(6, 6), () -> sparse(Tridiagonal(rand(5), rand(6), rand(5))))
+        A = Amk()
+        src = MatrixOperator(copy(A))
+        dest = MatrixOperator(zero(A))
+        copyto!(dest, src)
+        @test dest.A == A
+        @test typeof(dest.A) === typeof(A)   # structure preserved (sparse stays sparse)
+    end
+    # plain-array rhs still works (existing method)
+    d = MatrixOperator(zeros(3, 3))
+    copyto!(d, [1.0 2 3; 4 5 6; 7 8 9])
+    @test d.A == [1.0 2 3; 4 5 6; 7 8 9]
 end

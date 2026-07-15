@@ -1,16 +1,17 @@
 using SciMLOperators, LinearAlgebra, SparseArrays
+using ArrayInterface
 using Random
 
 using SciMLOperators: IdentityOperator,
-                      NullOperator,
-                      ScaledOperator,
-                      AddedOperator,
-                      ComposedOperator,
-                      AdjointOperator,
-                      TransposedOperator,
-                      InvertedOperator, AbstractAdjointVecOrMat,
-                      AbstractTransposedVecOrMat, getops,
-                      cache_operator
+    NullOperator,
+    ScaledOperator,
+    AddedOperator,
+    ComposedOperator,
+    AdjointOperator,
+    TransposedOperator,
+    InvertedOperator, AbstractAdjointVecOrMat,
+    AbstractTransposedVecOrMat, getops,
+    cache_operator
 
 Random.seed!(0)
 N = 8
@@ -39,6 +40,7 @@ K = 12
     @test size(Id) == (N, N)
     @test Id' isa IdentityOperator
     @test isconstant(Id)
+    @test !ArrayInterface.issingular(Id)
     @test_throws MethodError resize!(Id, N)
 
     for op in (*, \)
@@ -82,6 +84,8 @@ end
 
 @testset "NullOperator" begin
     A = rand(N, N) |> MatrixOperator
+    B = rand(N + 3, N + 2) |> MatrixOperator
+    C = rand(N, N + 3) |> MatrixOperator
     u = rand(N, K)
     v = rand(N, K)
     w = zeros(N, K)
@@ -104,6 +108,7 @@ end
     @test iscached(Z)
     @test size(Z) == (N, N)
     @test Z' isa NullOperator
+    @test size(Z') == (N, N)
 
     @test Z * u ≈ zero(u)
 
@@ -139,6 +144,85 @@ end
         @test op(Z, A) isa MatrixOperator
         @test op(A, Z) isa MatrixOperator
     end
+
+    Zrect = NullOperator(N + 2, N)
+    urect = rand(N, K)
+    wrect = zeros(N + 2, K)
+
+    @test !issquare(Zrect)
+    @test !issymmetric(Zrect)
+    @test !ishermitian(Zrect)
+    @test size(Zrect) == (N + 2, N)
+    @test convert(AbstractMatrix, Zrect) == zeros(Bool, size(Zrect))
+    @test size(Zrect') == (N, N + 2)
+    @test size(transpose(Zrect)) == (N, N + 2)
+
+    @test Zrect * urect ≈ zero(wrect)
+    @test Zrect(urect, urect, p, t) ≈ zero(wrect)
+
+    copy!(wrect, ones(N + 2, K))
+    Zrect(wrect, urect, urect, p, t)
+    @test wrect ≈ zero(wrect)
+
+    copy!(wrect, rand(N + 2, K))
+    orig_wrect = copy(wrect)
+    Zrect(wrect, urect, urect, p, t, α, β)
+    @test wrect ≈ β * orig_wrect
+
+    @test mul!(wrect, Zrect, urect) ≈ zero(wrect)
+    copy!(wrect, rand(N + 2, K))
+    orig_wrect = copy(wrect)
+    @test mul!(wrect, Zrect, urect, α, β) ≈ β * orig_wrect
+
+    @test size(Zrect * C) == (N + 2, N + 3)
+    @test size(B * Zrect) == (N + 3, N)
+    @test size(Zrect ∘ C) == (N + 2, N + 3)
+    @test size(B ∘ Zrect) == (N + 3, N)
+end
+
+@testset "BlockDiagonalOperator" begin
+    A = rand(3, 2)
+    B = rand(4, 5)
+    L = BlockDiagonalOperator(MatrixOperator(A), MatrixOperator(B))
+    Lmat = [A zeros(3, 5); zeros(4, 2) B]
+    v = rand(7, K)
+    u = rand(7, K)
+    w = zeros(7, K)
+    p = nothing
+    t = 0
+    α = rand()
+    β = rand()
+
+    @test size(L) == (7, 7)
+    @test islinear(L)
+    @test isconstant(L)
+    @test convert(AbstractMatrix, L) ≈ Lmat
+    @test BlockDiagonalOperator(A, B) isa BlockDiagonalOperator
+
+    @test L * v ≈ Lmat * v
+    @test L(v, u, p, t) ≈ Lmat * v
+
+    mul!(w, L, v)
+    @test w ≈ Lmat * v
+
+    copy!(w, rand(7, K))
+    orig_w = copy(w)
+    mul!(w, L, v, α, β)
+    @test w ≈ α * Lmat * v + β * orig_w
+
+    copy!(w, zeros(7, K))
+    L(w, v, u, p, t)
+    @test w ≈ Lmat * v
+
+    copy!(w, rand(7, K))
+    orig_w = copy(w)
+    L(w, v, u, p, t, α, β)
+    @test w ≈ α * Lmat * v + β * orig_w
+
+    x = rand(7)
+    @test L * x ≈ Lmat * x
+    @test convert(AbstractMatrix, L') ≈ Lmat'
+    @test convert(AbstractMatrix, transpose(L)) ≈ transpose(Lmat)
 end
 
 @testset "Unary +/-" begin
@@ -147,7 +231,7 @@ end
 
     # Test unary +
     @test +A === A
-    
+
     # Test unary - on constant MatrixOperator (simplified to MatrixOperator)
     minusA = -A
     @test minusA isa ScaledOperator
@@ -287,17 +371,17 @@ end
     A = MatrixOperator(rand(N, N))
     B = MatrixOperator(rand(N, N))
     C = MatrixOperator(rand(N, N))
-    
+
     # Create nested structure: (A + B) is an AddedOperator
     AB = A + B
     @test AB isa AddedOperator
-    
+
     # When we create AddedOperator((AB, C)), it should flatten
     L = AddedOperator((AB, C))
     @test L isa AddedOperator
     @test length(L.ops) == 3  # Should have A, B, C (not AB and C)
     @test all(op -> !isa(op, AddedOperator), L.ops)
-    
+
     # Verify correctness
     test_vec = rand(N, K)
     @test L * test_vec ≈ (A + B + C) * test_vec
@@ -420,11 +504,38 @@ end
     @test ldiv!(rand(N), op, u) ≈ op \ u
 end
 
+@testset "has_concretization composites" begin
+    A = MatrixOperator(rand(N, N))
+    B = MatrixOperator(rand(N, N))
+    F = FunctionOperator(
+        (du, u, p, t) -> copyto!(du, u),
+        zeros(N),
+        zeros(N);
+        isinplace = true,
+        T = Float64,
+        islinear = true
+    )
+
+    @test has_concretization(A)
+    @test has_concretization(2A)
+    @test has_concretization(A + B)
+    @test has_concretization(A * B)
+    @test has_concretization(inv(A))
+    @test !has_concretization(F)
+    @test !has_concretization(F * A)
+    @test !has_concretization(A + F)
+    @test !ishermitian(F * A)
+end
+
 @testset "Adjoint, Transpose" begin
-    for (op,
-        LType,
-        VType) in ((adjoint, AdjointOperator, AbstractAdjointVecOrMat),
-        (transpose, TransposedOperator, AbstractTransposedVecOrMat))
+    for (
+            op,
+            LType,
+            VType,
+        ) in (
+            (adjoint, AdjointOperator, AbstractAdjointVecOrMat),
+            (transpose, TransposedOperator, AbstractTransposedVecOrMat),
+        )
         A = rand(N, N)
         D = Bidiagonal(rand(N, N), :L)
         u = rand(N, K)       # Update vector
@@ -461,7 +572,7 @@ end
         @test op(u) * AAt ≈ op(A * u)
         @test op(u) / AAt ≈ op(A \ u)
 
-        # Not implementing separate test for adjoint/transpose operators 
+        # Not implementing separate test for adjoint/transpose operators
         # since they typically rely on the base operator implementations
 
         v = rand(N, K)
