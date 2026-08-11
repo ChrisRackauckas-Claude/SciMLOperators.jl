@@ -54,6 +54,23 @@ end
 
 """
 $TYPEDEF
+    AdjointOperator(L)
+
+Lazy adjoint wrapper for an `AbstractSciMLOperator`.
+
+# Arguments
+
+  - `L::AbstractSciMLOperator`: Operator to adjoint.
+
+# Fields
+
+  - `L`: Wrapped operator.
+
+# Interface Rules
+
+Construct through `adjoint(L)` or `L'`. The wrapper delegates updates and
+matrix-like application to the adjoint action of `L`; it is valid only when
+`has_adjoint(L)` is true.
 """
 struct AdjointOperator{T, LType} <: AbstractSciMLOperator{T}
     L::LType
@@ -65,6 +82,23 @@ end
 
 """
 $TYPEDEF
+    TransposedOperator(L)
+
+Lazy transpose wrapper for an `AbstractSciMLOperator`.
+
+# Arguments
+
+  - `L::AbstractSciMLOperator`: Operator to transpose.
+
+# Fields
+
+  - `L`: Wrapped operator.
+
+# Interface Rules
+
+Construct through `transpose(L)`. The wrapper delegates updates and
+matrix-like application to the transpose action of `L`; complex operators
+must distinguish this from `adjoint(L)`.
 """
 struct TransposedOperator{T, LType} <: AbstractSciMLOperator{T}
     L::LType
@@ -139,6 +173,18 @@ for (op, LType, VType) in (
     @eval function cache_internals(L::$LType, u::AbstractVecOrMat)
         @reset L.L = cache_operator(L.L, reshape(u, size(L, 1)))
         return L
+    end
+
+    # Like `ScaledOperator`, these wrappers hold no scratch of their own and so are
+    # transparent to the sharing described in `getcache`. The reshape is the same one
+    # `cache_internals` above does: what the wrapper is applied to is not what the operator
+    # it wraps is applied to.
+    @eval getcache(L::$LType) = getcache(L.L)
+    @eval update_cache(L::$LType, new_cache) = @reset L.L = update_cache(L.L, new_cache)
+
+    @eval function adopt_cache(L::$LType, cache, u::AbstractVecOrMat)
+        inner = adopt_cache(L.L, cache, reshape(u, size(L, 1)))
+        return inner === nothing ? nothing : (@reset L.L = inner)
     end
 
     # operator application

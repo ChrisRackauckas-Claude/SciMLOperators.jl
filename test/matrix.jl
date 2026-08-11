@@ -165,6 +165,17 @@ end
     L(w, v, u, p, t, α, β)
     @test w ≈ α * (A * v) + β * orig_w
 
+    # update_coefficients! with only an out-of-place update_func (#409)
+    Loop = MatrixOperator(zeros(N, N); update_func = (A, u, p, t) -> p * p')
+    update_coefficients!(Loop, u, p, t)
+    @test convert(AbstractMatrix, Loop) ≈ p * p'
+
+    # immutable storage cannot be updated in place through an out-of-place func
+    Limm = MatrixOperator(
+        reshape(1.0:(N * N), N, N); update_func = (A, u, p, t) -> p * p'
+    )
+    @test_throws ArgumentError update_coefficients!(Limm, u, p, t)
+
     A = [
         -2.0 1 0 0 0
         1 -2 1 0 0
@@ -329,6 +340,19 @@ end
     copy!(w, zeros(N, K))
     D(w, v, u, p, t)
     @test w ≈ expected
+
+    # update_coefficients! with only an out-of-place update_func (#409)
+    Doop = DiagonalOperator(zeros(N, K); update_func = (diag, u, p, t) -> p * t)
+    update_coefficients!(Doop, u, p, t)
+    copy!(w, zeros(N, K))
+    mul!(w, Doop, v)
+    @test w ≈ (p * t) .* v
+
+    # immutable storage cannot be updated in place through an out-of-place func
+    Dimm = DiagonalOperator(
+        reshape(1.0:(N * K), N, K); update_func = (diag, u, p, t) -> p * t
+    )
+    @test_throws ArgumentError update_coefficients!(Dimm, u, p, t)
 end
 
 @testset "AffineOperator" begin
@@ -733,6 +757,52 @@ end
             @test convert(AbstractMatrix, op) * v ≈ op * v
         end
 
+    end
+end
+
+@testset "TensorProductOperator cache size, square = $square" for square in [false, true]
+    m1, m2 = 3, 7
+    n1, n2 = square ? (m1, m2) : (5, 11)
+
+    A = rand(m1, n1)
+    B = rand(m2, n2)
+    AB = kron(A, B)
+    α, β = rand(), rand()
+
+    op = TensorProductOperator(A, B)
+
+    # Number of distinct buffers, since slots are deliberately aliased when square.
+    nbuffers(L) = length(unique(objectid, filter(!isnothing, collect(L.cache))))
+
+    # A vector input can only ever reach cache slots 1 and 5, so the other five are
+    # left unallocated: 4 buffers -> 1 when both factors are square, 7 -> 2 otherwise.
+    opv = cache_operator(op, rand(n1 * n2))
+    @test iscached(opv)
+    @test nbuffers(opv) == (square ? 1 : 2)
+
+    # A matrix input still gets the full cache.
+    opm = cache_operator(op, rand(n1 * n2, K))
+    @test nbuffers(opm) == (square ? 4 : 7)
+
+    # Specifically, the slots reached only from the `k > 1` branches stay empty.
+    @test opv.cache[1] isa AbstractMatrix
+    @test all(isnothing, (opv.cache[i] for i in (2, 3, 4, 6, 7)))
+    @test all(!isnothing, opm.cache)
+
+    # Every in-place path a vector input can take still gives the right answer.
+    v = rand(n1 * n2)
+    w = zeros(m1 * m2)
+    @test mul!(w, opv, v) ≈ AB * v
+
+    w = rand(m1 * m2)
+    orig_w = copy(w)
+    @test mul!(w, opv, v, α, β) ≈ α * (AB * v) + β * orig_w
+
+    if square
+        # `c5` is the one slot besides `c1` a vector input can reach.
+        opv_F = cache_operator(factorize(op), rand(n1 * n2))
+        y = rand(m1 * m2)
+        @test ldiv!(zeros(n1 * n2), opv_F, y) ≈ AB \ y
     end
 end
 

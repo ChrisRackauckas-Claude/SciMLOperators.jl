@@ -68,7 +68,7 @@ struct TensorProductOperator{T, O, C} <: AbstractSciMLOperator{T}
             },
             cache::Union{Tuple, Nothing}
         )
-        T = reduce(Base.promote_eltype, ops)
+        T = reduce(_promote_operator_eltype, ops)
 
         return new{
             T,
@@ -175,6 +175,8 @@ function update_coefficients(L::TensorProductOperator, u, p, t; kwargs...)
 end
 
 getops(L::TensorProductOperator) = L.ops
+getcache(L::TensorProductOperator) = L.cache
+adopt_cache(L::TensorProductOperator, cache, v) = cache_internals(update_cache(L, cache), v)
 
 # Copy method to avoid aliasing
 function Base.copy(L::TensorProductOperator)
@@ -247,7 +249,7 @@ struct TensorSumOperator{T, O, P} <: AbstractSciMLOperator{T}
         outer, inner = ops
         @assert issquare(outer)
         @assert issquare(inner)
-        T = reduce(Base.promote_eltype, ops)
+        T = reduce(_promote_operator_eltype, ops)
         return new{T, typeof(ops), typeof(products)}(ops, products)
     end
 end
@@ -426,7 +428,37 @@ function Base.:\(L::TensorProductOperator, v::AbstractVecOrMat)
     return v isa AbstractMatrix ? reshape(V, (n, k)) : reshape(V, (n,))
 end
 
-function cache_self(L::TensorProductOperator, v::AbstractVecOrMat)
+# `c1` (3 and 5 arg `mul!`) and `c5` (3 arg `ldiv!`) are read for every input shape.
+function _cache_self_c1_c5(L::TensorProductOperator, v::AbstractVecOrMat)
+    outer, inner = L.ops
+
+    mi, ni = size(inner)
+    mo, no = size(outer)
+    k = size(v, 2)
+
+    c1 = outer isa IdentityOperator ? nothing : lmul!(false, similar(v, (mi, no * k))) # c1 = inner * v
+
+    if mapreduce(issquare, &, L.ops)
+        c5 = c1
+    else
+        c5 = lmul!(false, similar(v, (ni, mo * k))) # c5 = inner \ v
+    end
+
+    return c1, c5
+end
+
+# Cache slots 2, 3, 4, 6 and 7 are read only by the `k > 1` branches of `outer_mul!`
+# and `outer_div!` — every path that reaches them returns early when the input has a
+# single column. A vector input therefore only ever touches `c1` and `c5`, so the rest
+# are left unallocated: 4 buffers down to 1 for square factors, 7 down to 2 otherwise.
+function cache_self(L::TensorProductOperator, v::AbstractVector)
+    c1, c5 = _cache_self_c1_c5(L, v)
+
+    @reset L.cache = (c1, nothing, nothing, nothing, c5, nothing, nothing)
+    return L
+end
+
+function cache_self(L::TensorProductOperator, v::AbstractMatrix)
     outer, inner = L.ops
 
     mi, ni = size(inner)
@@ -435,8 +467,10 @@ function cache_self(L::TensorProductOperator, v::AbstractVecOrMat)
 
     is_outer_identity = outer isa IdentityOperator
 
+    # 3 and 5 arg mul!, 3 arg ldiv!
+    c1, c5 = _cache_self_c1_c5(L, v)
+
     # 3 arg mul!
-    c1 = is_outer_identity ? nothing : lmul!(false, similar(v, (mi, no * k))) # c1 = inner * v
     c2 = is_outer_identity ? nothing : lmul!(false, similar(v, (no, mi, k))) # permute (2, 1, 3)
     c3 = is_outer_identity ? nothing : lmul!(false, similar(v, (mo, mi * k))) # c3 = outer * c2
 
@@ -445,9 +479,8 @@ function cache_self(L::TensorProductOperator, v::AbstractVecOrMat)
 
     # 3 arg ldiv!
     if mapreduce(issquare, &, L.ops)
-        c5, c6, c7 = c1, c2, c3
+        c6, c7 = c2, c3
     else
-        c5 = lmul!(false, similar(v, (ni, mo * k))) # c5 = inner \ v
         c6 = lmul!(false, similar(v, (mo, ni, k))) # permute (2, 1, 3)
         c7 = lmul!(false, similar(v, (no, ni * k))) # c7 = outer \ c6
     end
@@ -457,7 +490,11 @@ function cache_self(L::TensorProductOperator, v::AbstractVecOrMat)
 end
 
 function cache_internals(L::TensorProductOperator, v::AbstractVecOrMat)
-    if !iscached(L)
+    # Only this operator's own buffers are in question here — `iscached` is recursive, so
+    # testing it would re-run `cache_self` and throw away a perfectly good cache whenever a
+    # factor happens to be uncached, which is exactly the state `cache_operator` calls this
+    # in. `ComposedOperator` guards the same way.
+    if isnothing(L.cache)
         L = cache_self(L, v)
     end
 
@@ -610,8 +647,48 @@ end
 # helper functions
 const PERM = (2, 1, 3)
 
-_has_tensor_outer_mul_fast(outer) = false
-function _tensor_outer_mul_fast! end
+"""
+    has_tensor_outer_mul_fast(outer) -> Bool
+
+Return whether `outer` provides the specialized
+[`tensor_outer_mul_fast!`](@ref) contract used by batched
+`TensorProductOperator` multiplication.
+
+# Developer API
+
+This hook is for extension authors implementing an allocation-free fast path
+for an `outer` operator type. Return `true` only when the corresponding
+`tensor_outer_mul_fast!` methods are defined for both the unscaled and scaled
+call signatures. End users should rely on `mul!` or `TensorProductOperator`
+instead of calling or extending this hook directly.
+"""
+has_tensor_outer_mul_fast(outer) = false
+
+"""
+    tensor_outer_mul_fast!(w, outer, C, mi, mo, no, k[, α, β]) -> w
+
+Write the batched outer multiplication used by `TensorProductOperator` into
+`w` without allocating intermediate arrays.
+
+# Arguments
+
+  - `w`: destination with `mi * mo` rows and `k` columns.
+  - `outer`: operator of size `(mo, no)`.
+  - `C`: cached intermediate data with `mi * no` rows and `k` columns.
+  - `mi`, `mo`, `no`, `k`: dimensions derived from the tensor-product factors
+    and the batch size.
+  - `α`, `β`: optional scaling coefficients; the scaled method must compute
+    `w = α * outer_product + β * w`.
+
+# Developer API
+
+Only implement this hook together with
+[`has_tensor_outer_mul_fast`](@ref) returning `true` for the same `outer`
+type. Implement both call signatures, preserve the stated destination shape,
+and return `w`. This contract exists for package extensions; ordinary callers
+should use `mul!` on the enclosing `TensorProductOperator`.
+"""
+function tensor_outer_mul_fast! end
 
 function outer_mul(L::TensorProductOperator, v::AbstractVecOrMat, C::AbstractVecOrMat)
     outer, inner = L.ops
@@ -665,8 +742,8 @@ function outer_mul!(w::AbstractVecOrMat, L::TensorProductOperator, v::AbstractVe
         return w
     end
 
-    if _has_tensor_outer_mul_fast(outer)
-        _tensor_outer_mul_fast!(w, outer, C1, mi, mo, no, k)
+    if has_tensor_outer_mul_fast(outer)
+        tensor_outer_mul_fast!(w, outer, C1, mi, mo, no, k)
         return w
     end
 
@@ -708,8 +785,8 @@ function outer_mul!(
         return w
     end
 
-    if _has_tensor_outer_mul_fast(outer)
-        _tensor_outer_mul_fast!(w, outer, v, mi, mo, no, k, α, β)
+    if has_tensor_outer_mul_fast(outer)
+        tensor_outer_mul_fast!(w, outer, v, mi, mo, no, k, α, β)
         return w
     end
 

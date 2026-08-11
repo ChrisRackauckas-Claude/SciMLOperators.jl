@@ -51,6 +51,48 @@ Random.seed!(0)
     # And `\` works end-to-end
     b = randn(n)
     @test W_mm \ b ≈ convert(AbstractMatrix, W_mm) \ b
+
+    # In-place WOperator with an operator-typed Jacobian: no external caller
+    # maintains _concrete_form (jacobian2W! only handles plain-matrix J), so
+    # convert must rebuild it with the current gamma. Regression test for the
+    # silently-stale form built at init with gamma = 0 (Inf diagonal), see
+    # SciML/OrdinaryDiffEq.jl#3933.
+    J_op = MatrixOperator(randn(n, n))
+    W_op = WOperator{true}(I(n), 0.0, J_op, randn(n))
+    update_coefficients!(W_op; gamma = 0.25)
+    @test convert(AbstractMatrix, W_op) ≈ -Matrix(1.0I, n, n) / 0.25 +
+        convert(AbstractMatrix, J_op)
+    @test all(isfinite, convert(AbstractMatrix, W_op))
+    # Rebuilt again after gamma changes
+    update_coefficients!(W_op; gamma = 0.5)
+    @test convert(AbstractMatrix, W_op) ≈ -Matrix(1.0I, n, n) / 0.5 +
+        convert(AbstractMatrix, J_op)
+
+    J_sum = MatrixOperator(randn(n, n)) + MatrixOperator(randn(n, n))
+    W_sum = WOperator{true}(I, 0.0, J_sum, randn(n))
+    update_coefficients!(W_sum; gamma = 0.25)
+    @test convert(AbstractMatrix, W_sum) ≈ -Matrix(1.0I, n, n) / 0.25 +
+        convert(AbstractMatrix, J_sum)
+    update_coefficients!(W_sum; gamma = 0.5)
+    @test convert(AbstractMatrix, W_sum) ≈ -Matrix(1.0I, n, n) / 0.5 +
+        convert(AbstractMatrix, J_sum)
+
+    # Tensor-product Jacobian graph (the OrdinaryDiffEq AMF fd2d shape). Unlike
+    # the AddedOperator of MatrixOperators above, these report
+    # `isconvertible == false` yet still convert to an AbstractMatrix.
+    N = 4
+    h = 1 / (N + 1)
+    D_op = MatrixOperator((1 / h^2) * Tridiagonal(ones(N - 1), -2 * ones(N), ones(N - 1)))
+    J_kron = cache_operator(
+        0.1 * Base.kron(D_op, IdentityOperator(N)) +
+            0.1 * Base.kron(IdentityOperator(N), D_op),
+        zeros(N^2)
+    )
+    @test !isconvertible(J_kron)
+    W_kron = WOperator{true}(I, 1.0, J_kron, randn(N^2))
+    update_coefficients!(W_kron; gamma = 0.25)
+    @test convert(AbstractMatrix, W_kron) ≈ -Matrix(1.0I, N^2, N^2) / 0.25 +
+        convert(AbstractMatrix, J_kron)
 end
 
 @testset "WOperator isconvertible honesty" begin

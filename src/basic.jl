@@ -1,7 +1,29 @@
 """
-$(TYPEDEF)
+    IdentityOperator(len)
 
-Operator representing the identity function `id(v) = v`
+Matrix-free identity operator of size `(len, len)`.
+
+# Arguments
+
+  - `len::Integer`: Number of rows and columns.
+
+# Fields
+
+  - `len::Int`: Stored operator dimension.
+
+# Interface Rules
+
+`IdentityOperator` is constant, square, invertible, and supports the generic
+`AbstractSciMLOperator` application, caching, and trait interfaces. It is
+returned unchanged when composed with a compatible operator.
+
+# Examples
+
+```julia
+using SciMLOperators
+
+IdentityOperator(2) * [3.0, 4.0] == [3.0, 4.0]
+```
 """
 struct IdentityOperator <: AbstractSciMLOperator{Bool}
     len::Int
@@ -102,6 +124,11 @@ end
 
 # operator fusion with identity returns operator itself
 for op in (:*, :∘)
+    @eval function Base.$op(left::IdentityOperator, right::IdentityOperator)
+        @assert left.len == right.len
+        return left
+    end
+
     @eval function Base.$op(ii::IdentityOperator, A::AbstractSciMLOperator)
         @assert size(A, 1) == ii.len
         return A
@@ -111,6 +138,7 @@ for op in (:*, :∘)
         @assert size(A, 2) == ii.len
         return A
     end
+
 end
 
 function Base.:\(ii::IdentityOperator, A::AbstractSciMLOperator)
@@ -124,9 +152,35 @@ function Base.:/(A::AbstractSciMLOperator, ii::IdentityOperator)
 end
 
 """
-$(TYPEDEF)
+    NullOperator(M, N)
+    NullOperator(N)
 
-Operator representing the null function `n(v) = 0 * v`
+Matrix-free zero operator of size `(M, N)`. The one-argument constructor
+creates a square zero operator.
+
+# Arguments
+
+  - `M::Integer`: Number of output rows.
+  - `N::Integer`: Number of input columns.
+
+# Fields
+
+  - `M::Int`: Stored output dimension.
+  - `N::Int`: Stored input dimension.
+
+# Interface Rules
+
+The operator is constant and linear. It returns a zero result with the input
+container's element type and batch shape, and composition with a compatible
+operator remains a `NullOperator` with the composed dimensions.
+
+# Examples
+
+```julia
+using SciMLOperators
+
+NullOperator(2, 3) * ones(3) == zeros(2)
+```
 """
 struct NullOperator <: AbstractSciMLOperator{Bool}
     M::Int
@@ -135,6 +189,18 @@ end
 
 # constructors
 NullOperator(N::Integer) = NullOperator(N, N)
+
+for op in (:*, :∘)
+    @eval function Base.$op(ii::IdentityOperator, nn::NullOperator)
+        @assert ii.len == nn.M
+        return nn
+    end
+
+    @eval function Base.$op(nn::NullOperator, ii::IdentityOperator)
+        @assert nn.N == ii.len
+        return nn
+    end
+end
 
 function Base.zero(L::AbstractSciMLOperator)
     return NullOperator(size(L)...)
@@ -222,6 +288,11 @@ end
 
 # operator fusion, composition
 for op in (:*, :∘)
+    @eval function Base.$op(left::NullOperator, right::NullOperator)
+        @assert left.N == right.M
+        return NullOperator(left.M, right.N)
+    end
+
     @eval function Base.$op(nn::NullOperator, A::AbstractSciMLOperator)
         @assert size(A, 1) == nn.N
         return NullOperator(nn.M, size(A, 2))
@@ -233,8 +304,16 @@ for op in (:*, :∘)
     end
 end
 
+Base.:*(::AbstractSciMLScalarOperator, nn::NullOperator) = nn
+Base.:*(nn::NullOperator, ::AbstractSciMLScalarOperator) = nn
+
 # operator addition, subtraction with NullOperator returns operator itself
 for op in (:+, :-)
+    @eval function Base.$op(left::NullOperator, right::NullOperator)
+        @assert size(left) == size(right)
+        return left
+    end
+
     @eval function Base.$op(nn::NullOperator, A::AbstractSciMLOperator)
         @assert size(A) == size(nn)
         return A
@@ -246,12 +325,34 @@ for op in (:+, :-)
     end
 end
 
+Base.:+(nn::NullOperator, α::AbstractSciMLScalarOperator) = α
+Base.:+(α::AbstractSciMLScalarOperator, nn::NullOperator) = α
+Base.:-(nn::NullOperator, α::AbstractSciMLScalarOperator) = -α
+Base.:-(α::AbstractSciMLScalarOperator, nn::NullOperator) = α
+
 """
 $TYPEDEF
 
-    ScaledOperator
+    ScaledOperator(λ, L)
 
-    (λ L)*(v) = λ * L(v)
+Lazy scalar multiple of an `AbstractSciMLOperator`, representing `λ * L`.
+
+# Arguments
+
+  - `λ`: A number, `UniformScaling`, or `AbstractSciMLScalarOperator`.
+  - `L::AbstractSciMLOperator`: Operator being scaled.
+
+# Fields
+
+  - `λ`: Lazy scalar factor.
+  - `L`: Wrapped operator.
+
+# Interface Rules
+
+Updates, caching, and trait queries are forwarded to both fields. The result
+is linear exactly when `L` is linear; division traits additionally require a
+nonzero current scalar value. Prefer `λ * L` to constructing this type
+directly.
 """
 struct ScaledOperator{
         T,
@@ -273,7 +374,7 @@ end
 # constructors
 for T in SCALINGNUMBERTYPES[2:end]
     @eval function ScaledOperator(λ::$T, L::AbstractSciMLOperator)
-        T2 = Base.promote_eltype(λ, L)
+        T2 = _promote_operator_eltype(λ, L)
         Λ = λ isa UniformScaling ? UniformScaling(T2(λ.λ)) : T2(λ)
         return ScaledOperator(ScalarOperator(Λ), L)
     end
@@ -376,6 +477,22 @@ function cache_internals(L::ScaledOperator, v::AbstractVecOrMat)
     return L
 end
 
+# A scaling holds no scratch of its own, so it is transparent to the sharing described in
+# `getcache`: the cache one field down is exactly as interchangeable as one held directly.
+# Forwarding matters more than it looks — `A - B` lowers to `AddedOperator(A, -B)` with
+# `-B` a `ScaledOperator`, so without this the commonest sum of all shares nothing.
+getcache(L::ScaledOperator) = getcache(L.L)
+update_cache(L::ScaledOperator, new_cache) = @reset L.L = update_cache(L.L, new_cache)
+
+function adopt_cache(L::ScaledOperator, cache, v)
+    inner = adopt_cache(L.L, cache, v)
+    inner === nothing && return nothing
+
+    @reset L.L = inner
+    @reset L.λ = cache_operator(L.λ, v)
+    return L
+end
+
 # getindex
 Base.getindex(L::ScaledOperator, i::Int) = L.coeff * L.L[i]
 Base.getindex(L::ScaledOperator, I::Vararg{Int, N}) where {N} = L.λ * L.L[I...]
@@ -457,9 +574,24 @@ end
 end
 
 """
-Lazy operator addition
+    AddedOperator(A, B, ...)
 
-    (A1 + A2 + A3...)v = A1*v + A2*v + A3*v ....
+Lazy sum of compatible `AbstractSciMLOperator`s.
+
+# Arguments
+
+  - `A, B, ...`: One or more operators with identical sizes.
+
+# Fields
+
+  - `ops`: Tuple of component operators. Nested sums are flattened.
+
+# Interface Rules
+
+The action is the sum of each component action. Updates, caching, and traits
+are forwarded componentwise; a trait is true only when every required
+component supports it. Use `A + B` rather than constructing this type
+directly.
 """
 struct AddedOperator{
         T,
@@ -538,6 +670,16 @@ function Base.:+(Z::NullOperator, A::AddedOperator)
     return A
 end
 
+function Base.:-(A::AddedOperator, Z::NullOperator)
+    @assert size(A) == size(Z)
+    return A
+end
+
+function Base.:-(Z::NullOperator, A::AddedOperator)
+    @assert size(A) == size(Z)
+    return -A
+end
+
 Base.:-(A::AddedOperator) = AddedOperator(map(-, A.ops))
 Base.:-(A::AbstractSciMLOperator, B::AbstractSciMLOperator) = AddedOperator(A, -B)
 Base.:-(A::AbstractSciMLOperator, B::AbstractMatrix) = A - MatrixOperator(B)
@@ -545,6 +687,26 @@ Base.:-(A::AbstractMatrix, B::AbstractSciMLOperator) = MatrixOperator(A) - B
 Base.:-(A::AddedOperator, B::AbstractSciMLOperator) = AddedOperator(A.ops..., -B)
 Base.:-(A::AbstractSciMLOperator, B::AddedOperator) = AddedOperator(A, (-B).ops...)
 Base.:-(A::AddedOperator, B::AddedOperator) = AddedOperator(A.ops..., (-B).ops...)
+
+function Base.:+(A::AddedOperator, α::AbstractSciMLScalarOperator)
+    @assert issquare(A)
+    return iszero(α) ? A : AddedOperator(A.ops..., α * IdentityOperator(size(A, 1)))
+end
+
+function Base.:+(α::AbstractSciMLScalarOperator, A::AddedOperator)
+    @assert issquare(A)
+    return iszero(α) ? A : AddedOperator(α * IdentityOperator(size(A, 1)), A.ops...)
+end
+
+function Base.:-(A::AddedOperator, α::AbstractSciMLScalarOperator)
+    @assert issquare(A)
+    return iszero(α) ? A : AddedOperator(A.ops..., (-α) * IdentityOperator(size(A, 1)))
+end
+
+function Base.:-(α::AbstractSciMLScalarOperator, A::AddedOperator)
+    @assert issquare(A)
+    return AddedOperator(α * IdentityOperator(size(A, 1)), (-A).ops...)
+end
 
 for op in (:+, :-)
     for T in SCALINGNUMBERTYPES
@@ -618,22 +780,15 @@ end
 @generated function update_coefficients(L::AddedOperator, u, p, t; kwargs...)
     ops_types = L.parameters[2].parameters
     N = length(ops_types)
-    return quote
-        ops = Base.@ntuple $N i -> update_coefficients(L.ops[i], u, p, t; kwargs...)
-        return AddedOperator(ops)
-    end
+    updates = [:(update_coefficients(L.ops[$i], u, p, t; kwargs...)) for i in 1:N]
+    return :(AddedOperator($(Expr(:tuple, updates...))))
 end
 
 @generated function update_coefficients!(L::AddedOperator, u, p, t; kwargs...)
     ops_types = L.parameters[2].parameters
     N = length(ops_types)
-    return quote
-        Base.@nexprs $N i -> begin
-            update_coefficients!(L.ops[i], u, p, t; kwargs...)
-        end
-
-        nothing
-    end
+    updates = [:(update_coefficients!(L.ops[$i], u, p, t; kwargs...)) for i in 1:N]
+    return Expr(:block, updates..., :(nothing))
 end
 
 getops(L::AddedOperator) = L.ops
@@ -650,9 +805,22 @@ has_adjoint(L::AddedOperator) = all(has_adjoint, L.ops)
 @generated function cache_internals(L::AddedOperator, v::AbstractVecOrMat)
     ops_types = L.parameters[2].parameters
     N = length(ops_types)
+    syms = [Symbol(:op_, i) for i in 1:N]
+
+    # `mul!` applies the summands one after another, so no two of their caches are ever
+    # live at the same time and a summand can reuse the scratch of an earlier one. Only
+    # summands of the same concrete type can qualify — that is what pins their element
+    # types — so the candidates are picked out here, at compile time, and each summand
+    # tries them all before allocating anything of its own.
+    stmts = map(1:N) do i
+        donors = Expr(:tuple, syms[findall(j -> ops_types[j] === ops_types[i], 1:(i - 1))]...)
+        earlier = Expr(:tuple, syms[1:(i - 1)]...)
+        return :($(syms[i]) = _cache_summand(L.ops[$i], $donors, $earlier, v))
+    end
+
     return quote
-        ops = Base.@ntuple $N i -> cache_operator(L.ops[i], v)
-        return AddedOperator(ops)
+        $(stmts...)
+        return AddedOperator($(Expr(:tuple, syms...)))
     end
 end
 
@@ -668,13 +836,8 @@ end
     )
     ops_types = L.parameters[2].parameters
     N = length(ops_types)
-    return quote
-        mul!(w, L.ops[1], v)
-        Base.@nexprs $(N - 1) i -> begin
-            mul!(w, L.ops[i + 1], v, true, true)
-        end
-        w
-    end
+    applications = [:(mul!(w, L.ops[$i], v, true, true)) for i in 2:N]
+    return Expr(:block, :(mul!(w, L.ops[1], v)), applications..., :w)
 end
 
 @generated function LinearAlgebra.mul!(
@@ -686,13 +849,8 @@ end
     )
     ops_types = L.parameters[2].parameters
     N = length(ops_types)
-    return quote
-        lmul!(β, w)
-        Base.@nexprs $(N) i -> begin
-            mul!(w, L.ops[i], v, α, true)
-        end
-        w
-    end
+    applications = [:(mul!(w, L.ops[$i], v, α, true)) for i in 1:N]
+    return Expr(:block, :(lmul!(β, w)), applications..., :w)
 end
 
 # Out-of-place: v is action vector, u is update vector
@@ -708,16 +866,9 @@ end
     # We don't need to update coefficients of L, as op(w, v, u, p, t) will do it for each op
 
     ops_types = L.parameters[2].parameters
-    N = length(ops_types) - 1
-
-    return quote
-        L.ops[1](w, v, u, p, t; kwargs...)
-        Base.@nexprs $N i -> begin
-            op = L.ops[i + 1]
-            op(w, v, u, p, t, true, true; kwargs...)
-        end
-        w
-    end
+    N = length(ops_types)
+    applications = [:(L.ops[$i](w, v, u, p, t, true, true; kwargs...)) for i in 2:N]
+    return Expr(:block, :(L.ops[1](w, v, u, p, t; kwargs...)), applications..., :w)
 end
 
 # In-place with scaling: w = α*(L*v) + β*w
@@ -728,25 +879,32 @@ end
 
     T = L.parameters[1]
     ops_types = L.parameters[2].parameters
-    N = length(ops_types) - 1
-
-    return quote
-        L.ops[1](w, v, u, p, t, α, β; kwargs...)
-        Base.@nexprs $N i -> begin
-            op = L.ops[i + 1]
-            op(w, v, u, p, t, α, true; kwargs...)
-        end
-        w
-    end
+    N = length(ops_types)
+    applications = [:(L.ops[$i](w, v, u, p, t, α, true; kwargs...)) for i in 2:N]
+    return Expr(:block, :(L.ops[1](w, v, u, p, t, α, β; kwargs...)), applications..., :w)
 end
 
 """
-    Lazy operator composition
+    ComposedOperator(A, B, ...)
 
-    ∘(A, B, C)(v) = A(B(C(v)))
+Lazy composition representing `A * B * ...`, with the rightmost operator
+applied first.
 
-    ops = (A, B, C)
-    cache = (B*C*v , C*v)
+# Arguments
+
+  - `A, B, ...`: One or more dimension-compatible operators.
+
+# Fields
+
+  - `ops`: Tuple of component operators in multiplication order.
+  - `cache`: Intermediate arrays used by in-place multiplication, or `nothing`.
+
+# Interface Rules
+
+Updates are forwarded to every component. Call `cache_operator` before
+repeated in-place application when intermediate storage is required. The
+composition is linear, convertible, or supports a trait only when all
+components satisfy the corresponding contract.
 """
 struct ComposedOperator{T, O, C} <: AbstractSciMLOperator{T}
     """ Tuple of N operators to be applied in reverse"""
@@ -876,6 +1034,8 @@ function update_coefficients(L::ComposedOperator, u, p, t; kwargs...)
 end
 
 getops(L::ComposedOperator) = L.ops
+getcache(L::ComposedOperator) = L.cache
+adopt_cache(L::ComposedOperator, cache, v) = cache_internals(update_cache(L, cache), v)
 
 # Copy method to avoid aliasing
 function Base.copy(L::ComposedOperator)
@@ -1145,7 +1305,24 @@ function (L::ComposedOperator)(
 end
 
 """
-    Lazy Operator Inverse
+    InvertedOperator(L)
+
+Lazy inverse of an `AbstractSciMLOperator`.
+
+# Arguments
+
+  - `L::AbstractSciMLOperator`: Operator whose current action is inverted.
+
+# Fields
+
+  - `L`: Wrapped operator.
+  - `cache`: Optional work arrays used by in-place division.
+
+# Interface Rules
+
+Construct this type through `inv(L)`. The wrapped operator must support the
+division operations required by the chosen application form. Updates and
+caching are forwarded to `L`; inversion does not materialize a matrix.
 """
 struct InvertedOperator{T, LType, C} <: AbstractSciMLOperator{T}
     L::LType
@@ -1201,6 +1378,8 @@ function update_coefficients(L::InvertedOperator, u, p, t; kwargs...)
 end
 
 getops(L::InvertedOperator) = (L.L,)
+getcache(L::InvertedOperator) = L.cache
+adopt_cache(L::InvertedOperator, cache, v) = cache_internals(update_cache(L, cache), v)
 islinear(L::InvertedOperator) = islinear(L.L)
 isconvertible(::InvertedOperator) = false
 
