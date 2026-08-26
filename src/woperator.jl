@@ -481,3 +481,7 @@ function LinearAlgebra.mul!(Y::AbstractArray, W::WOperator, B::AbstractArray)
 end
 
 has_concretization(::AbstractWOperator) = true
+
+function has_concretization(W::WOperator)
+    return has_concretization(W.mass_matrix) & has_concretization(W.J)
+end
